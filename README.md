@@ -19,8 +19,8 @@ random credentials, builds the images, starts Postgres, runs migrations, and sta
 worker, the API and the dashboard. It prints the URL (http://localhost:8080) and the login.
 
 ```bash
-cp salesdata.csv data/inbox/copart/          # ingest a real export
-python3 scripts/simulate_export.py           # drop a realistic "next hour" export
+cp ~/Downloads/salesdata.csv data/inbox/copart/   # ingest an export you downloaded
+python3 scripts/simulate_export.py                # a realistic "next hour" export from the latest one
 docker compose logs -f worker api            # watch it happen
 docker compose down                          # stop (add -v to delete the database too)
 ```

@@ -44,7 +44,7 @@ cat <<MSG
   Login       ${DASHBOARD_USERNAME:-admin} / ${DASHBOARD_PASSWORD}   (stored in .env)
   Inbox       $(pwd)/data/inbox/copart/   <- save Copart CSV exports here
 
-  Try it:     cp salesdata.csv data/inbox/copart/
+  Try it:     cp ~/Downloads/salesdata.csv data/inbox/copart/
               python3 scripts/simulate_export.py      # a realistic "next hour" export
   Logs:       docker compose logs -f worker api
   Stop:       docker compose down
