@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 export interface PipelineEvent {
-  type: "run_started" | "run_finished" | "alert" | "alert_resolved" | "alert_updated";
+  type: "run_started" | "run_finished" | "alert" | "alert_resolved" | "alert_updated" | "downloader";
   [key: string]: unknown;
 }
 
@@ -11,7 +11,9 @@ export function queriesFor(event: PipelineEvent): string[][] {
   switch (event.type) {
     case "run_started":
     case "run_finished":
-      return [["overview"], ["runs"], ["run"], ["lots"], ["lot"], ["schema"]];
+      return [["overview"], ["runs"], ["run"], ["lots"], ["lot"], ["schema"], ["downloader"]];
+    case "downloader":
+      return [["downloader"]];
     case "alert":
     case "alert_resolved":
     case "alert_updated":

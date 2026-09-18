@@ -35,7 +35,9 @@ cat > "$PLIST" <<PLIST
   <array>
     <string>$ROOT/backend/.venv/bin/python</string>
     <string>-m</string><string>ingest.downloader</string>
-    <string>run</string><string>--jitter</string><string>300</string>
+    <string>run</string><string>--scheduled</string>
+    <string>--every</string><string>3600</string>
+    <string>--jitter</string><string>300</string>
   </array>
   <key>WorkingDirectory</key><string>$ROOT/backend</string>
   <key>StartInterval</key><integer>3600</integer>

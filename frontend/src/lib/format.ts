@@ -12,6 +12,22 @@ export function int(n: number | null | undefined): string {
   return n === null || n === undefined ? "—" : intFmt.format(n);
 }
 
+/** Countdown text: "4:05", "1:02:09" (never negative). */
+export function countdown(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+export function clockTime(iso: string | null | undefined): string {
+  return iso ? timeFmt.format(new Date(iso)) : "—";
+}
+
 export function bytes(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   const units = ["B", "KB", "MB", "GB"];

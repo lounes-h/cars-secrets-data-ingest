@@ -1,7 +1,8 @@
 """Copart sales data downloader.
 
     python -m ingest.downloader login            # once, and whenever an alert asks for it
-    python -m ingest.downloader run [--jitter S] # one paced download (what launchd runs hourly)
+    python -m ingest.downloader run [--jitter S] # one paced download
+    python -m ingest.downloader run --scheduled --every 3600 --jitter 300   # what launchd runs
     python -m ingest.downloader status
 """
 
@@ -18,6 +19,7 @@ import structlog
 
 from ..alerts import AlertSpec, raise_alert, resolve_fingerprint
 from ..db import connect
+from ..db import notify as notify_event
 from ..log_config import configure_logging
 from .core import (
     REPO_ROOT,
@@ -58,6 +60,51 @@ def notify(settings: DownloaderSettings, spec: AlertSpec | None, resolve: tuple[
         log.exception("downloader.alert_failed")
 
 
+def save(settings: DownloaderSettings, state: State) -> None:
+    """Persist the state locally and publish it for the dashboard (best effort)."""
+    state.save(settings.state_file)
+    url = settings.db_url
+    if not url:
+        return
+    allowed = next_allowed_attempt(state, settings)
+    try:
+        with connect(url) as conn:
+            conn.execute(
+                """INSERT INTO downloader_status (source, updated_at, last_invocation_at,
+                       schedule_interval_seconds, jitter_seconds, last_attempt_at,
+                       last_success_at, consecutive_failures, next_allowed_at, needs_attention)
+                   VALUES (%s, now(), %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (source) DO UPDATE SET
+                       updated_at = now(),
+                       last_invocation_at = EXCLUDED.last_invocation_at,
+                       schedule_interval_seconds = EXCLUDED.schedule_interval_seconds,
+                       jitter_seconds = EXCLUDED.jitter_seconds,
+                       last_attempt_at = EXCLUDED.last_attempt_at,
+                       last_success_at = EXCLUDED.last_success_at,
+                       consecutive_failures = EXCLUDED.consecutive_failures,
+                       next_allowed_at = EXCLUDED.next_allowed_at,
+                       needs_attention = EXCLUDED.needs_attention""",
+                (SOURCE, state.last_invocation_at, state.schedule_interval_seconds,
+                 state.jitter_seconds, state.last_attempt_at, state.last_success_at,
+                 state.consecutive_failures,
+                 None if allowed is None or state.last_attempt_at is None else allowed,
+                 state.needs_attention),
+            )
+            notify_event(conn, "downloader", source=SOURCE)
+    except Exception:  # noqa: BLE001 - the dashboard view is best effort
+        log.exception("downloader.status_publish_failed")
+
+
+def record_invocation(settings: DownloaderSettings, now: datetime, every: int,
+                      jitter: int) -> None:
+    """A scheduled wake-up: remember it (before the random delay) to predict the next one."""
+    state = State.load(settings.state_file)
+    state.last_invocation_at = now.isoformat()
+    state.schedule_interval_seconds = every
+    state.jitter_seconds = jitter
+    save(settings, state)
+
+
 def run_once(
     settings: DownloaderSettings,
     *,
@@ -80,7 +127,7 @@ def run_once(
 
     started = now()
     state.last_attempt_at = started.isoformat()
-    state.save(settings.state_file)
+    save(settings, state)
 
     try:
         page_state, path = fetch(settings, WORK_DIR)
@@ -89,7 +136,7 @@ def run_once(
 
     if page_state in (PageState.LOGIN_REQUIRED, PageState.CHALLENGE):
         state.needs_attention = page_state.value
-        state.save(settings.state_file)
+        save(settings, state)
         what = ("Copart session expired" if page_state is PageState.LOGIN_REQUIRED
                 else "Copart showed a verification/blocking page")
         notify(settings, AlertSpec(
@@ -114,7 +161,7 @@ def run_once(
     final = deliver(path, settings.inbox_dir, started)
     state.consecutive_failures = 0
     state.last_success_at = now().isoformat()
-    state.save(settings.state_file)
+    save(settings, state)
     log.info("downloader.delivered", file=str(final), bytes=final.stat().st_size)
     notify(settings, None, resolve=(FP_FAILED,))
     return OK
@@ -122,7 +169,7 @@ def run_once(
 
 def _failed(settings: DownloaderSettings, state: State, error: str) -> int:
     state.consecutive_failures += 1
-    state.save(settings.state_file)
+    save(settings, state)
     retry = next_allowed_attempt(state, settings)
     log.error("downloader.failed", error=error, failures=state.consecutive_failures,
               next_attempt=retry.isoformat() if retry else None)
@@ -148,7 +195,7 @@ def login(settings: DownloaderSettings) -> int:
     state = State.load(settings.state_file)
     state.needs_attention = None
     state.consecutive_failures = 0
-    state.save(settings.state_file)
+    save(settings, state)
     notify(settings, None, resolve=(FP_ATTENTION,))
     print("Logged in. Hourly downloads will resume.")
     return OK
@@ -156,6 +203,7 @@ def login(settings: DownloaderSettings) -> int:
 
 def status(settings: DownloaderSettings) -> int:
     state = State.load(settings.state_file)
+    save(settings, state)  # also refreshes the dashboard
     allowed = next_allowed_attempt(state, settings)
     print(f"last attempt:  {state.last_attempt_at or 'never'}")
     print(f"last success:  {state.last_success_at or 'never'}")
@@ -173,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--jitter", type=int, default=0,
                      help="wait a random 0..N seconds first (spreads scheduled runs)")
     run.add_argument("--force", action="store_true", help="ignore the minimum interval")
+    run.add_argument("--scheduled", action="store_true",
+                     help="invoked by the scheduler: record the wake-up for the dashboard")
+    run.add_argument("--every", type=int, default=3600,
+                     help="scheduler interval in seconds (with --scheduled)")
     sub.add_parser("status", help="show pacing state")
     args = parser.parse_args(argv)
 
@@ -182,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         return login(settings)
     if args.command == "status":
         return status(settings)
+    if args.scheduled:
+        record_invocation(settings, datetime.now(UTC), args.every, args.jitter)
     time.sleep(jitter_seconds(args.jitter))
     return run_once(settings, force=args.force)
 

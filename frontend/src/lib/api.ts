@@ -145,6 +145,23 @@ export interface LotImage {
   hd: string | null;
 }
 
+export type DownloadStatus = "scheduled" | "starting" | "paused" | "late" | "unknown";
+
+export interface Downloader {
+  installed: boolean;
+  status: DownloadStatus;
+  /** Server clock when computed: the countdown corrects for a skewed browser clock with it. */
+  now: string;
+  next_run_at: string | null;
+  window_end: string | null;
+  last_success_at?: string | null;
+  last_attempt_at?: string | null;
+  consecutive_failures?: number;
+  needs_attention?: string | null;
+  schedule_interval_seconds?: number | null;
+  jitter_seconds?: number | null;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -189,6 +206,7 @@ export const api = {
     request<{ username: string }>("POST", "/api/auth/login", { username, password }),
   logout: () => request<void>("POST", "/api/auth/logout"),
   overview: () => request<Overview>("GET", "/api/overview"),
+  downloader: () => request<Downloader>("GET", "/api/downloader"),
   runs: (params?: Params) =>
     request<{ items: Run[]; total: number }>("GET", withParams("/api/runs", params)),
   run: (id: number) => request<RunDetail>("GET", `/api/runs/${id}`),

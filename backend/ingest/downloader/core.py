@@ -135,6 +135,11 @@ class State:
     consecutive_failures: int = 0
     # Set when Copart shows a login page or a challenge; cleared only by `login`.
     needs_attention: str | None = None
+    # Last wake-up by the scheduler (before the random delay) and the schedule it runs on;
+    # together they predict the next download (see schedule.py).
+    last_invocation_at: str | None = None
+    schedule_interval_seconds: int | None = None
+    jitter_seconds: int = 0
 
     @classmethod
     def load(cls, path: Path) -> State:

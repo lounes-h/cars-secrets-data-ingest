@@ -54,7 +54,7 @@ and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are i
 | Page | What it shows |
 |---|---|
 | Overview | Pipeline health, worker heartbeat, per-provider last file, lot counts, changes per run, ingest duration, open alerts |
-| Runs | Every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
+| Runs | A live countdown to the next download (or why none is coming: paused, overdue, not scheduled), then every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
 | Alerts | Open/resolved alerts with severity filter; acknowledge and resolve |
 | Schema | Every column a provider has sent, what it maps to, and when it appeared or disappeared |
 | Lots | Search by lot number, VIN, make or model, with thumbnails; per lot: photo gallery (full size + HD), a link to the lot on the auction site (all photos, bidding) and field-by-field change history |

@@ -1,4 +1,5 @@
 import dataclasses
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,3 +179,28 @@ def test_ttl_cache_expires_and_is_bounded():
     cache.put("c", 3)
     cache.put("d", 4)
     assert cache.get("b") is None and cache.get("d") == 4
+
+
+def test_downloader_next_run(authed, conn):
+    assert authed.get("/api/downloader").json()["status"] == "unknown"  # not installed yet
+    conn.execute("""INSERT INTO downloader_status (source, last_invocation_at,
+                        schedule_interval_seconds, jitter_seconds, last_attempt_at,
+                        next_allowed_at)
+                    VALUES ('copart', now() - interval '10 minutes', 3600, 300,
+                            now() - interval '9 minutes', now() + interval '36 minutes')""")
+    body = authed.get("/api/downloader").json()
+    assert body["installed"] and body["status"] == "scheduled"
+    now = datetime.fromisoformat(body["now"])
+
+    def about(value, expected):  # inserted and read in two statements, ms apart
+        return abs(datetime.fromisoformat(value) - now - expected) < timedelta(seconds=5)
+
+    assert about(body["next_run_at"], timedelta(minutes=50))
+    assert about(body["window_end"], timedelta(minutes=55))
+
+    conn.execute("UPDATE downloader_status SET needs_attention = 'challenge'")
+    assert authed.get("/api/downloader").json()["status"] == "paused"
+
+
+def test_downloader_status_requires_login(client):
+    assert client.get("/api/downloader").status_code == 401

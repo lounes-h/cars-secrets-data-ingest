@@ -51,6 +51,15 @@ cd backend && .venv/bin/python -m ingest.downloader run --force # first download
 Sign in is clicked for you; otherwise log in as usual. The window closes itself once the
 download button is reachable.
 
+## Next download on the dashboard
+
+The Runs page shows a countdown to the next download. Every scheduled wake-up
+(`run --scheduled`) and every attempt writes the downloader's state to the `downloader_status`
+table. The API works out the first wake-up at or after the earliest time pacing allows
+(`ingest/downloader/schedule.py`). The card also shows when downloads are **paused** (log in),
+**overdue** (no wake-up: the Mac is asleep or the schedule was removed) or **not scheduled**
+(the schedule predates this feature: re-run `./scripts/install_downloader.sh`).
+
 ## Day to day
 
 | Situation | What you see | What to do |

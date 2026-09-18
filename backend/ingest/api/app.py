@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from ..config import Settings, get_settings
 from ..db import EVENTS_CHANNEL
+from ..downloader.schedule import next_run
 from ..log_config import configure_logging
 from ..monitor import run_checks
 from ..providers import PROVIDERS
@@ -284,6 +285,24 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         shutil.move(str(src), target)
         conn.execute("UPDATE ingest_files SET archived_path = NULL WHERE id = %s", (run_id,))
         return {"status": "requeued", "file": target.name}
+
+    # --- downloader ------------------------------------------------------------------------------
+    @api.get("/downloader")
+    def downloader(conn: Conn) -> dict[str, Any]:
+        """Next expected download, from the status the host-side downloader publishes."""
+        now = conn.execute("SELECT now() AS now").fetchone()["now"]
+        row = conn.execute(
+            "SELECT * FROM downloader_status WHERE source = 'copart'").fetchone()
+        if row is None:
+            return {"installed": False, "now": now, "status": "unknown",
+                    "next_run_at": None, "window_end": None}
+        nxt = next_run(
+            now, last_invocation=row["last_invocation_at"],
+            interval_s=row["schedule_interval_seconds"], jitter_s=row["jitter_seconds"] or 0,
+            next_allowed=row["next_allowed_at"], needs_attention=row["needs_attention"],
+        )
+        return {"installed": True, "now": now, "status": nxt.status, "next_run_at": nxt.at,
+                "window_end": nxt.window_end, **row}
 
     # --- alerts ----------------------------------------------------------------------------------
     @api.get("/alerts")

@@ -272,3 +272,25 @@ def test_window_closed_mid_download_gets_a_clear_alert(dsettings, conn):
 
     assert cli.run_once(dsettings, now=Clock(), fetch=closed) == cli.FAILED
     assert "window was closed" in open_alerts(conn)[cli.FP_FAILED]["title"]
+
+
+def test_scheduled_wake_up_and_runs_are_published_for_the_dashboard(dsettings, conn):
+    cli.record_invocation(dsettings, T0, every=3600, jitter=300)
+    row = conn.execute("SELECT * FROM downloader_status").fetchone()
+    assert row["last_invocation_at"] == T0
+    assert (row["schedule_interval_seconds"], row["jitter_seconds"]) == (3600, 300)
+    assert row["next_allowed_at"] is None  # never attempted: allowed right away
+
+    cli.run_once(dsettings, now=Clock(T0 + timedelta(minutes=2)),
+                 fetch=fetch_returning(PageState.READY, SAMPLE))
+    row = conn.execute("SELECT * FROM downloader_status").fetchone()
+    assert row["last_success_at"] == T0 + timedelta(minutes=2)
+    assert row["next_allowed_at"] == T0 + timedelta(minutes=47)
+    assert row["last_invocation_at"] == T0  # a run itself does not move the schedule
+
+
+def test_pause_is_published(dsettings, conn):
+    cli.run_once(dsettings, now=Clock(), fetch=fetch_returning(PageState.LOGIN_REQUIRED))
+    row = conn.execute("SELECT needs_attention, next_allowed_at FROM downloader_status"
+                       ).fetchone()
+    assert row == {"needs_attention": "login_required", "next_allowed_at": None}

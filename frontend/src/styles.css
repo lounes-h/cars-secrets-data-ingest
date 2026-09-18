@@ -254,3 +254,12 @@ pre { background: var(--surface-2); padding: 8px 10px; border-radius: 8px; overf
   background: var(--surface); color: var(--ink);
 }
 .button-link:hover { background: var(--surface-2); text-decoration: none; }
+
+/* Next download */
+.next-download { display: grid; grid-template-columns: auto auto 1fr; gap: 14px; align-items: center; margin-bottom: 14px; }
+.next-download .icon { width: 20px; height: 20px; }
+.next-download.paused { background: var(--critical-wash); }
+.next-download.late { background: var(--warning-wash); }
+.nd-label { color: var(--ink-2); font-size: 12.5px; }
+.nd-countdown { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 640px) { .next-download { grid-template-columns: auto 1fr; } .next-download > .small { grid-column: 1 / -1; } }

@@ -90,7 +90,8 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   `login`. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
   HTTP redirects, which bypass routing), so they never reach the real site. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
   code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
-  `.part` rename.
+  `.part` rename. It publishes its state to `downloader_status` (best effort) so the Runs page
+  can count down to the next download; only `--scheduled` wake-ups move the predicted schedule.
 
 ## Security rules
 
