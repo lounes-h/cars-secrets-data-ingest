@@ -11,8 +11,10 @@ the pipeline picks it up (`data/inbox/copart/`).
 ## How it behaves
 
 - **Real Chrome, your session.** The downloader drives the installed Google Chrome through
-  Playwright, with its own profile in `~/.cars-ingest/copart-profile`. You log in once by hand
-  and later runs reuse the session. No password is stored anywhere.
+  Playwright, with its own profile in `~/.cars-ingest/copart-profile`. You log in once and
+  later runs reuse the session. The downloader never types or stores your password. If you
+  let Chrome save it in that profile, `login` clicks **Sign in** for you once the form is
+  filled (once only: a wrong password or a second factor is left to you).
 - **Like a person.** It opens the page and clicks **Download CSV file**. It runs hourly with up
   to 5 min of random delay, and never more than once per 45 min, whatever the scheduler does.
   The window is visible by default (`COPART_HEADED=false` to hide it).
@@ -23,8 +25,11 @@ the pipeline picks it up (`data/inbox/copart/`).
 - **Backs off on errors.** Timeouts, network errors or a changed page layout are retried after
   1 h, 2 h, 4 h, then every 6 h, with a warning alert that becomes critical after 3 failures in
   a row.
-- **Only complete, valid files reach the pipeline.** The download lands in `data/.downloads/`
-  and is checked: it must be a CSV whose header has `Lot number`, which rules out an HTML
+- **Leave the window open.** It closes by itself when the file is saved. Closing it early
+  cancels that run ("the Chrome window was closed before the download finished").
+- **Only complete, valid files reach the pipeline.** Chrome writes the download into
+  `data/.downloads/`, which is cleared at the start of each run. The finished file is renamed
+  (never copied) and checked: it must be a CSV whose header has `Lot number`, which rules out an HTML
   error page. It is then moved into the inbox as `salesdata_<UTC time>.csv` via a `.part`
   name, so the worker never reads a half-written file. An invalid file goes to
   `data/failed/downloader/` instead.
@@ -42,7 +47,8 @@ cd backend && .venv/bin/python -m ingest.downloader login       # log in once, b
 cd backend && .venv/bin/python -m ingest.downloader run --force # first download now
 ```
 
-`login` opens a Chrome window on Copart. Log in as usual; the window closes itself once the
+`login` opens a Chrome window on Copart. If Chrome fills in your saved email and password,
+Sign in is clicked for you; otherwise log in as usual. The window closes itself once the
 download button is reachable.
 
 ## Day to day

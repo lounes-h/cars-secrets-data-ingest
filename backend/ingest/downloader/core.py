@@ -85,6 +85,17 @@ def classify_page(url: str, title: str, text: str, has_download_button: bool) ->
     return PageState.UNKNOWN
 
 
+def should_auto_sign_in(
+    state: PageState, username_filled: bool, password_filled: bool, has_button: bool,
+    already_tried: bool,
+) -> bool:
+    """Click "Sign in" for the person only on a plain login page, only when Chrome's password
+    manager filled both fields, and only once (a second failure means the person must look:
+    wrong password, second factor...)."""
+    return (state is PageState.LOGIN_REQUIRED and username_filled and password_filled
+            and has_button and not already_tried)
+
+
 # --- file validation and hand-off --------------------------------------------------------------
 
 class InvalidDownload(Exception):

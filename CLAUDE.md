@@ -83,9 +83,12 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
 - **Downloader** (`ingest/downloader`, see `docs/downloader.md`): real Chrome via Playwright
   with a persistent profile; a person logs in with `login`. Pure logic lives in `core.py`
   (tested with a fake browser); `browser.py` is the only code that touches Copart. It must
-  never enter credentials, solve or bypass a CAPTCHA/bot check, rotate IPs or spoof
-  fingerprints: a login or challenge page pauses downloads and raises a critical alert until
-  a person logs in. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
+  never type or store credentials, solve or bypass a CAPTCHA/bot check, rotate IPs or spoof
+  fingerprints. The one exception: during `login` it may click "Sign in" **once** when
+  Chrome's password manager has already filled both fields. Scheduled runs never log in: a
+  login or challenge page pauses downloads and raises a critical alert until a person runs
+  `login`. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
+  HTTP redirects, which bypass routing), so they never reach the real site. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
   code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
   `.part` rename.
 

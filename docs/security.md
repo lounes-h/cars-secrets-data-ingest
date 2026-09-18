@@ -42,8 +42,10 @@ timeout. The CSP `img-src` allows that image host and nothing else, and images l
 
 The downloader keeps Copart's session cookie in a dedicated Chrome profile at
 `~/.cars-ingest/copart-profile` (mode 700), outside the repository. No Copart password is
-stored anywhere: a person logs in by hand. The downloader never enters credentials and never
-interacts with CAPTCHAs or bot checks. Such a page pauses it and raises an alert.
+stored by this project. A person logs in: either by typing, or by letting Chrome's own
+password manager fill the form in that profile, after which `login` clicks Sign in once. The
+downloader never types credentials and never interacts with CAPTCHAs or bot checks. Such a
+page pauses it and raises an alert. Scheduled runs never attempt a login.
 
 ## Network
 
