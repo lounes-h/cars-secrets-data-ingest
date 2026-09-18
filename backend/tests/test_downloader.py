@@ -12,10 +12,13 @@ from ingest.downloader.core import (
     InvalidDownload,
     PageState,
     State,
+    action_delay_seconds,
     classify_page,
     deliver,
+    is_close_label,
     jitter_seconds,
     next_allowed_attempt,
+    retry,
     should_auto_sign_in,
     validate_csv,
 )
@@ -136,6 +139,21 @@ def test_state_roundtrip_and_corrupt_file(tmp_path):
     assert State.load(path) == State()
 
 
+def test_action_delay_is_random_within_bounds():
+    settings = DownloaderSettings(_env_file=None, action_delay_min_seconds=1.5,
+                                  action_delay_max_seconds=4)
+    rng = random.Random(7)
+    delays = [action_delay_seconds(settings, rng) for _ in range(200)]
+    assert all(1.5 <= d <= 4 for d in delays)
+    assert len({round(d, 3) for d in delays}) > 100  # not a fixed rhythm
+    swapped = DownloaderSettings(_env_file=None, action_delay_min_seconds=4,
+                                 action_delay_max_seconds=1.5)
+    assert 1.5 <= action_delay_seconds(swapped, rng) <= 4
+    off = DownloaderSettings(_env_file=None, action_delay_min_seconds=0,
+                             action_delay_max_seconds=0)
+    assert action_delay_seconds(off) == 0
+
+
 def test_jitter_bounds():
     rng = random.Random(1)
     assert all(0 <= jitter_seconds(300, rng) <= 300 for _ in range(100))
@@ -168,10 +186,8 @@ def test_runs_are_paced_even_if_scheduled_too_often(dsettings, conn):
     assert len(fetch.calls) == 2
 
 
-@pytest.mark.parametrize("page_state", [PageState.LOGIN_REQUIRED, PageState.CHALLENGE])
-def test_login_page_or_challenge_pauses_until_a_person_logs_in(dsettings, conn, page_state,
-                                                               monkeypatch):
-    fetch = fetch_returning(page_state)
+def test_challenge_pauses_until_a_person_logs_in(dsettings, conn, monkeypatch):
+    fetch = fetch_returning(PageState.CHALLENGE)
     clock = Clock()
 
     assert cli.run_once(dsettings, now=clock, fetch=fetch) == cli.NEEDS_PERSON
@@ -191,6 +207,40 @@ def test_login_page_or_challenge_pauses_until_a_person_logs_in(dsettings, conn, 
     assert State.load(dsettings.state_file).needs_attention is None
     ok = fetch_returning(PageState.READY, SAMPLE)
     assert cli.run_once(dsettings, now=clock, fetch=ok) == cli.OK
+
+
+@pytest.mark.parametrize("page_state", [PageState.LOGIN_REQUIRED, PageState.SIGN_IN_REJECTED])
+def test_login_page_is_retried_then_pauses_to_protect_the_account(dsettings, conn, page_state):
+    """The run already tried the saved login once. A miss is a failure with backoff; only
+    MAX_FAILED_LOGINS runs in a row pause, so a wrong saved password cannot lock the account."""
+    fetch = fetch_returning(page_state)
+    clock = Clock()
+    for n in (1, 2):
+        assert cli.run_once(dsettings, now=clock, fetch=fetch, force=True) == cli.FAILED
+        state = State.load(dsettings.state_file)
+        assert (state.failed_logins, state.needs_attention) == (n, None)
+        assert f"{n}/3 before pausing" in open_alerts(conn)[cli.FP_FAILED]["title"]
+        clock.at += timedelta(hours=3)
+    assert cli.FP_ATTENTION not in open_alerts(conn)
+
+    assert cli.run_once(dsettings, now=clock, fetch=fetch, force=True) == cli.NEEDS_PERSON
+    assert State.load(dsettings.state_file).needs_attention == page_state.value
+    alert = open_alerts(conn)[cli.FP_ATTENTION]
+    assert alert["severity"] == "critical" and "3 runs in a row" in alert["title"]
+    assert cli.run_once(dsettings, now=clock, fetch=fetch, force=True) == cli.NEEDS_PERSON
+    assert len(fetch.calls) == 3  # paused: Copart not contacted again
+
+
+def test_a_successful_run_resets_login_misses_and_clears_the_pause_alert(dsettings, conn):
+    clock = Clock()
+    cli.run_once(dsettings, now=clock, fetch=fetch_returning(PageState.SIGN_IN_REJECTED))
+    cli.notify(dsettings, cli.AlertSpec("critical", "downloader_attention", "old pause",
+                                        cli.FP_ATTENTION, {}))
+    clock.at += timedelta(hours=2)
+    assert cli.run_once(dsettings, now=clock, fetch=fetch_returning(PageState.READY, SAMPLE),
+                        force=True) == cli.OK
+    assert State.load(dsettings.state_file).failed_logins == 0
+    assert not {cli.FP_FAILED, cli.FP_ATTENTION} & set(open_alerts(conn))
 
 
 def test_failed_login_keeps_downloads_paused(dsettings, monkeypatch):
@@ -263,15 +313,67 @@ def test_should_auto_sign_in(state, user, password, button, tried, expected):
     assert should_auto_sign_in(state, user, password, button, tried) is expected
 
 
-def test_window_closed_mid_download_gets_a_clear_alert(dsettings, conn):
+def test_browser_crashing_every_attempt_gets_a_clear_alert(dsettings, conn):
     from ingest.downloader.browser import WindowClosed
 
     def closed(settings, work_dir):
-        raise WindowClosed("the Chrome window was closed before the download finished "
-                           "(leave it open: it closes by itself)")
+        raise WindowClosed("Chrome closed or crashed before the download finished, "
+                           "3 times in a row")
 
     assert cli.run_once(dsettings, now=Clock(), fetch=closed) == cli.FAILED
-    assert "window was closed" in open_alerts(conn)[cli.FP_FAILED]["title"]
+    assert "crashed" in open_alerts(conn)[cli.FP_FAILED]["title"]
+
+
+class Flaky(Exception):
+    pass
+
+
+def test_retry_until_success_pausing_between_attempts():
+    calls, pauses, retried = [], [], []
+
+    def fn():
+        calls.append(1)
+        if len(calls) < 3:
+            raise Flaky(len(calls))
+        return "done"
+
+    assert retry(fn, attempts=3, retryable=lambda e: isinstance(e, Flaky),
+                 pause=lambda: pauses.append(1),
+                 on_retry=lambda n, e: retried.append(n)) == "done"
+    assert (len(calls), len(pauses), retried) == (3, 2, [1, 2])
+
+
+def test_retry_gives_up_after_the_last_attempt_or_on_other_errors():
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        raise Flaky
+
+    with pytest.raises(Flaky):
+        retry(flaky, attempts=2, retryable=lambda e: True, pause=lambda: None)
+    assert len(calls) == 2
+
+    def broken():
+        calls.append(1)
+        raise ValueError
+
+    with pytest.raises(ValueError):
+        retry(broken, attempts=5, retryable=lambda e: isinstance(e, Flaky), pause=lambda: None)
+    assert len(calls) == 3  # not retried
+
+
+@pytest.mark.parametrize("label, expected", [
+    ("Close", True), ("  close dialog ", True), ("×", True), ("✕", True), ("X", True),
+    ("No thanks", True), ("No, thanks!", True), ("Not now", True), ("Maybe later", True),
+    ("Skip", True), ("Got it", True), ("Dismiss", True),
+    # never accept or agree on the person's behalf, nor act on anything else
+    ("Accept", False), ("I agree", False), ("Continue", False), ("OK", False),
+    ("Sign in", False), ("Close account", False), ("Download CSV file", False), ("", False),
+    (None, False),
+])
+def test_close_labels(label, expected):
+    assert is_close_label(label) is expected
 
 
 def test_status_is_published_for_the_dashboard(dsettings, conn):
@@ -327,7 +429,7 @@ def test_state_file_from_an_older_version_still_loads(tmp_path):
 
 
 def test_pause_is_published(dsettings, conn):
-    cli.run_once(dsettings, now=Clock(), fetch=fetch_returning(PageState.LOGIN_REQUIRED))
+    cli.run_once(dsettings, now=Clock(), fetch=fetch_returning(PageState.CHALLENGE))
     row = conn.execute("SELECT needs_attention, next_allowed_at FROM downloader_status"
                        ).fetchone()
-    assert row == {"needs_attention": "login_required", "next_allowed_at": None}
+    assert row == {"needs_attention": "challenge", "next_allowed_at": None}

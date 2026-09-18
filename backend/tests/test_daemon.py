@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ingest.downloader.core import DownloaderSettings, State
-from ingest.downloader.daemon import Daemon, plan_next_run, serve
+from ingest.downloader.daemon import Daemon, lift_login_pause, plan_next_run, serve
 
 T0 = datetime(2026, 9, 18, 4, 0, tzinfo=UTC)
 HOUR = timedelta(hours=1)
@@ -115,9 +115,13 @@ def test_download_now_request_runs_immediately_and_is_cleared(tmp_path):
     assert h.state().next_run_at == (at + HOUR).isoformat()
 
 
-def test_paused_never_downloads_even_on_request(tmp_path):
+@pytest.mark.parametrize("pause", [
+    State(needs_attention="challenge"),
+    State(needs_attention="sign_in_rejected", failed_logins=3),
+])
+def test_paused_never_downloads_even_on_request(tmp_path, pause):
     h = Harness(tmp_path)
-    State(needs_attention="login_required").save(h.settings.state_file)
+    pause.save(h.settings.state_file)
     h.daemon.start()
     h.request = T0
     h.live(hours=3)
@@ -130,6 +134,30 @@ def test_paused_never_downloads_even_on_request(tmp_path):
     state.save(h.settings.state_file)
     h.live(seconds=5)
     assert len(h.runs) == 1
+
+
+def test_login_pause_from_before_auto_sign_in_is_lifted_on_start(tmp_path):
+    # Written by the old version: paused at the first login page, no saved login ever tried.
+    h = Harness(tmp_path)
+    State(needs_attention="login_required", consecutive_failures=2).save(h.settings.state_file)
+    h.daemon.start()
+    assert h.state().needs_attention is None
+    h.live(seconds=5)
+    assert len(h.runs) == 1  # the run tries the saved login
+
+
+@pytest.mark.parametrize("state, lifted", [
+    (State(needs_attention="login_required"), True),
+    (State(needs_attention="sign_in_rejected", failed_logins=2), True),
+    (State(needs_attention="login_required", failed_logins=3), False),  # earned: stays
+    (State(needs_attention="challenge"), False),  # never lifted automatically
+    (State(), False),
+])
+def test_lift_login_pause(state, lifted):
+    settings = DownloaderSettings(_env_file=None)
+    before = state.needs_attention
+    assert lift_login_pause(state, settings) is lifted
+    assert state.needs_attention == (None if lifted else before)
 
 
 def test_catches_up_after_sleep_once_the_network_had_a_minute(tmp_path):

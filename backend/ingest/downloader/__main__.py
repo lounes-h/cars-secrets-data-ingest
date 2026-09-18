@@ -167,19 +167,18 @@ def run_once(
     except Exception as exc:  # noqa: BLE001 - timeouts, network, browser crashes
         return _failed(settings, state, f"{type(exc).__name__}: {exc}")
 
-    if page_state in (PageState.LOGIN_REQUIRED, PageState.CHALLENGE):
-        state.needs_attention = page_state.value
-        save(settings, state)
-        what = ("Copart session expired" if page_state is PageState.LOGIN_REQUIRED
-                else "Copart showed a verification/blocking page")
-        notify(settings, AlertSpec(
-            "critical", "downloader_attention",
-            f"{what}: downloads paused until you log in again",
-            FP_ATTENTION,
-            {"page_state": page_state.value,
-             "fix": "cd backend && .venv/bin/python -m ingest.downloader login"},
-        ))
-        return NEEDS_PERSON
+    if page_state is PageState.CHALLENGE:
+        return _pause(settings, state, page_state,
+                      "Copart showed a verification/blocking page")
+    if page_state in (PageState.LOGIN_REQUIRED, PageState.SIGN_IN_REJECTED):
+        state.failed_logins += 1
+        what = ("Copart rejected the saved login" if page_state is PageState.SIGN_IN_REJECTED
+                else "Copart asked to log in and Chrome did not fill the saved login")
+        if state.failed_logins >= settings.max_failed_logins:
+            return _pause(settings, state, page_state,
+                          f"{what} ({state.failed_logins} runs in a row)")
+        return _failed(settings, state, f"{what}; retrying "
+                       f"({state.failed_logins}/{settings.max_failed_logins} before pausing)")
     if page_state is not PageState.READY or path is None:
         return _failed(settings, state, "download button not found (page layout changed?)")
 
@@ -193,11 +192,27 @@ def run_once(
 
     final = deliver(path, settings.inbox_dir, started)
     state.consecutive_failures = 0
+    state.failed_logins = 0
     state.last_success_at = now().isoformat()
     save(settings, state)
     log.info("downloader.delivered", file=str(final), bytes=final.stat().st_size)
-    notify(settings, None, resolve=(FP_FAILED,))
+    notify(settings, None, resolve=(FP_FAILED, FP_ATTENTION))
     return OK
+
+
+def _pause(settings: DownloaderSettings, state: State, page_state: PageState, what: str) -> int:
+    """Stop all downloads until a person runs `login`: a challenge is never retried, and a
+    saved login that keeps failing must not lock the account."""
+    state.needs_attention = page_state.value
+    save(settings, state)
+    notify(settings, AlertSpec(
+        "critical", "downloader_attention",
+        f"{what}: downloads paused until you log in again",
+        FP_ATTENTION,
+        {"page_state": page_state.value,
+         "fix": "cd backend && .venv/bin/python -m ingest.downloader login"},
+    ))
+    return NEEDS_PERSON
 
 
 def _failed(settings: DownloaderSettings, state: State, error: str) -> int:
@@ -220,8 +235,9 @@ def login(settings: DownloaderSettings) -> int:
     from .browser import interactive_login
 
     print("A Chrome window opens on Copart. If Chrome has your login saved, 'Sign in' is\n"
-          "clicked for you; otherwise log in there yourself. The window closes by itself once\n"
-          "the 'Download CSV file' button is reachable.")
+          "clicked for you; otherwise log in there yourself and let Chrome save the password,\n"
+          "so later runs can sign in by themselves. The window closes by itself once the\n"
+          "'Download CSV file' button is reachable.")
     with download_lock(settings.lock_file) as acquired:
         if not acquired:
             print("A download is in progress right now; try again in a minute or two.")
@@ -233,6 +249,7 @@ def login(settings: DownloaderSettings) -> int:
     state = State.load(settings.state_file)
     state.needs_attention = None
     state.consecutive_failures = 0
+    state.failed_logins = 0
     save(settings, state)
     notify(settings, None, resolve=(FP_ATTENTION,))
     print("Logged in. Hourly downloads will resume.")

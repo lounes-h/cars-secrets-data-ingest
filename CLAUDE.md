@@ -81,13 +81,18 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   queries per event type (`frontend/src/lib/events.ts`).
 - Timestamps that measure work use `clock_timestamp()`, not `now()` (transaction start).
 - **Downloader** (`ingest/downloader`, see `docs/downloader.md`): real Chrome via Playwright
-  with a persistent profile; a person logs in with `login`. Pure logic lives in `core.py`
-  (tested with a fake browser); `browser.py` is the only code that touches Copart. It must
-  never type or store credentials, solve or bypass a CAPTCHA/bot check, rotate IPs or spoof
-  fingerprints. The one exception: during `login` it may click "Sign in" **once** when
-  Chrome's password manager has already filled both fields. Scheduled runs never log in: a
-  login or challenge page pauses downloads and raises a critical alert until a person runs
-  `login`. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
+  with a persistent profile; a person logs in once with `login` and saves the password in
+  Chrome. Pure logic lives in `core.py` (tested with a fake browser); `browser.py` is the
+  only code that touches Copart. It must never type or store credentials, solve or bypass a
+  CAPTCHA/bot check, rotate IPs or spoof fingerprints. It runs unattended: when the session
+  expired, a run clicks "Sign in" **once** if Chrome's password manager filled both fields; a
+  login page it cannot pass is a failed run, and `MAX_FAILED_LOGINS` (3) in a row pause
+  downloads (account lockout). A challenge page pauses at once. Pauses raise a critical alert
+  until a person runs `login`. Pop-ups are closed only through close-type controls
+  (`core.CLOSE_LABEL`, never accept/agree), never on a challenge page;
+  `COPART_DISMISS_SELECTORS` adds selectors. It waits a random 1.5–4 s before each click. A
+  Chrome crash relaunches it within the run (`BROWSER_ATTEMPTS`), after stopping orphaned
+  Chrome processes on the profile. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
   HTTP redirects, which bypass routing), so they never reach the real site. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
   code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
   `.part` rename. It runs as an always-on process (`daemon.py`, launchd `KeepAlive`, installed
@@ -196,7 +201,9 @@ A code change is not considered complete until the relevant unit tests have been
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
   when download size changes; tune `ROW_COUNT_DEVIATION_RATIO` if it is noisy.
 - Single worker by design (per-provider advisory lock makes a second one safe but idle).
-- Copart downloader built (hourly via launchd, pauses and alerts on login or bot pages).
+- Copart downloader built (always-on under launchd, signs in with Chrome's saved login,
+  closes pop-ups, relaunches Chrome after crashes; pauses and alerts on bot pages or a saved
+  login that keeps failing).
   Copart's Image and Data License Agreement governs the data and photos; the owner is
   checking that automated downloads are allowed.
 - Not done yet: external alert channels, a second provider.

@@ -17,6 +17,15 @@ export type View =
   | { kind: "not_installed" };
 
 /** What to show at `nowMs` (server-corrected), re-derived every second between refetches. */
+/** Why downloads are paused (the downloader's `needs_attention`), in words. */
+export function pauseReason(reason: string | null | undefined): string {
+  switch (reason) {
+    case "challenge": return "Copart showed a verification page";
+    case "sign_in_rejected": return "Copart rejected the saved login several runs in a row";
+    default: return "Copart asked to log in and Chrome's saved login did not work";
+  }
+}
+
 export function viewAt(d: Downloader, nowMs: number): View {
   switch (d.status) {
     case "not_installed": return { kind: "not_installed" };
@@ -89,7 +98,7 @@ export function NextDownload() {
     case "paused":
       label = "Downloads";
       big = "paused";
-      detail = <>Copart {view.reason === "challenge" ? "showed a verification page" : "needs you to log in again"}. Run <code>{LOGIN_CMD}</code>. {lastOk}</>;
+      detail = <>{pauseReason(view.reason)}. Run <code>{LOGIN_CMD}</code>. {lastOk}</>;
       break;
     case "not_running":
       label = "Downloader";

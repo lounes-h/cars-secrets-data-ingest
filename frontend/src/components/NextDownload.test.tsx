@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Downloader } from "../lib/api";
 import { countdown } from "../lib/format";
 import { downloaderLine } from "../pages/Overview";
-import { NextDownload, viewAt } from "./NextDownload";
+import { NextDownload, pauseReason, viewAt } from "./NextDownload";
 
 const base: Downloader = {
   installed: true, status: "scheduled", now: "2026-09-18T03:00:00Z",
@@ -23,6 +23,22 @@ describe("next download view", () => {
     expect(viewAt({ ...base, status: "paused", needs_attention: "challenge" }, 0)).toEqual({ kind: "paused", reason: "challenge" });
     expect(viewAt({ ...base, status: "not_running" }, 0)).toEqual({ kind: "not_running", since: base.heartbeat_at });
     expect(viewAt({ installed: false, status: "not_installed" }, 0).kind).toBe("not_installed");
+  });
+});
+
+describe("pause reason", () => {
+  it("names each reason downloads stop for", () => {
+    expect(pauseReason("challenge")).toMatch(/verification page/);
+    expect(pauseReason("sign_in_rejected")).toMatch(/rejected the saved login/);
+    expect(pauseReason("login_required")).toMatch(/saved login did not work/);
+    expect(pauseReason(null)).toMatch(/log in/);
+  });
+
+  it("is shown on the overview line", () => {
+    const [tone, text] = downloaderLine({ ...base, status: "paused", needs_attention: "sign_in_rejected" });
+    expect(tone).toBe("critical");
+    render(<p>{text}</p>);
+    expect(screen.getByText(/rejected the saved login/)).toBeInTheDocument();
   });
 });
 
