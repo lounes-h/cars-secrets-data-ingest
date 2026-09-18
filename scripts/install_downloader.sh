@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Schedule the Copart downloader hourly with launchd (macOS), in your user session so it can
-# open Chrome. Run once; re-run to update. `--uninstall` removes the schedule.
+# Run the Copart downloader as an always-on process under launchd (macOS), in your user
+# session so it can open Chrome. launchd starts it at login and restarts it if it stops; the
+# process itself downloads hourly. Run once; re-run to update. `--uninstall` removes it.
 #
 #   ./scripts/install_downloader.sh
 #   ./scripts/install_downloader.sh --uninstall
@@ -35,13 +36,14 @@ cat > "$PLIST" <<PLIST
   <array>
     <string>$ROOT/backend/.venv/bin/python</string>
     <string>-m</string><string>ingest.downloader</string>
-    <string>run</string><string>--scheduled</string>
+    <string>daemon</string>
     <string>--every</string><string>3600</string>
     <string>--jitter</string><string>300</string>
   </array>
   <key>WorkingDirectory</key><string>$ROOT/backend</string>
-  <key>StartInterval</key><integer>3600</integer>
-  <key>RunAtLoad</key><false/>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>$LOG_DIR/downloader.log</string>
   <key>StandardErrorPath</key><string>$LOG_DIR/downloader.log</string>
@@ -49,15 +51,15 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 launchctl bootstrap "$DOMAIN" "$PLIST"
-# The first wake-up is one interval from now: tell the dashboard, so its countdown is right.
-(cd backend && .venv/bin/python -m ingest.downloader mark-scheduled --every 3600 --jitter 300)
 
 cat <<MSG
-Downloader scheduled: every hour (plus up to 5 min random delay), at most once per 45 min.
+Downloader running: launchd keeps it alive (restarts it within a minute if it stops).
+It downloads every hour (plus up to 5 min random delay), at most once per 45 min, and right
+after the Mac wakes if it slept through a download. "Download now" is on the dashboard.
 
   Log in first (once):  cd backend && .venv/bin/python -m ingest.downloader login
   Download now:         cd backend && .venv/bin/python -m ingest.downloader run --force
   Status:               cd backend && .venv/bin/python -m ingest.downloader status
   Log:                  $LOG_DIR/downloader.log
-  Remove schedule:      ./scripts/install_downloader.sh --uninstall
+  Stop and remove:      ./scripts/install_downloader.sh --uninstall
 MSG

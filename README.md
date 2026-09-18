@@ -26,8 +26,8 @@ docker compose down                          # stop (add -v to delete the databa
 ```
 
 Exports reach the inbox through the **Copart downloader**, which clicks "Download CSV file"
-hourly in Chrome using your logged-in session. Set it up with
-`./scripts/install_downloader.sh` and see [docs/downloader.md](docs/downloader.md). Any
+hourly in Chrome using your logged-in session. `./start.sh` installs it and launchd keeps it
+running; see [docs/downloader.md](docs/downloader.md). Any
 other tool works as well if it saves into `data/inbox/copart/`. Writing to a temporary name
 and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are ignored.
 
@@ -53,8 +53,8 @@ and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are i
 
 | Page | What it shows |
 |---|---|
-| Overview | Pipeline health, worker heartbeat, per-provider last file, lot counts, changes per run, ingest duration, open alerts |
-| Runs | A live countdown to the next download (or why none is coming: paused, overdue, not scheduled), then every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
+| Overview | Pipeline health, worker and downloader status (running, next download), per-provider last file, lot counts, changes per run, ingest duration, open alerts |
+| Runs | A live countdown to the next download with a **Download now** button (or why none is coming: paused, not running, not set up), then every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
 | Alerts | Open/resolved alerts with severity filter; acknowledge and resolve |
 | Schema | Every column a provider has sent, what it maps to, and when it appeared or disappeared |
 | Lots | Search by lot number, VIN, make or model, with thumbnails; per lot: photo gallery (full size + HD), a link to the lot on the auction site (all photos, bidding) and field-by-field change history |
@@ -79,6 +79,7 @@ New warning and critical alerts pop up on whatever page is open (Server-Sent Eve
 | `duplicate_file` | info | Identical export received again |
 | `downloader_attention` | critical | Copart showed a login or verification page; downloads paused until you run `login` |
 | `downloader_failed` | warning → critical | The download failed (timeout, invalid file, changed page); retried with backoff |
+| `downloader_down` | critical | The always-on downloader stopped reporting for 2.5 min; resolves itself when launchd restarts it |
 
 ## Configuration
 

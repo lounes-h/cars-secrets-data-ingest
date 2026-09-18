@@ -1,29 +1,33 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api, type Downloader } from "../lib/api";
 import { ago, clockTime, countdown } from "../lib/format";
 import { Icon } from "./ui";
+import { useToast } from "./Toasts";
 
 const LOGIN_CMD = "cd backend && .venv/bin/python -m ingest.downloader login";
-const INSTALL_CMD = "./scripts/install_downloader.sh";
 
 export type View =
-  | { kind: "countdown"; remainingMs: number; at: string; windowEnd: string | null }
-  | { kind: "starting"; windowEnd: string | null }
-  | { kind: "late"; at: string | null }
+  | { kind: "countdown"; remainingMs: number; at: string }
+  | { kind: "due" }
+  | { kind: "downloading" }
+  | { kind: "requested" }
   | { kind: "paused"; reason: string | null | undefined }
-  | { kind: "unknown"; installed: boolean };
+  | { kind: "not_running"; since: string | null | undefined }
+  | { kind: "not_installed" };
 
-/** What to show at `nowMs` (server-corrected), re-derived every second between refetches so
- * the display moves on by itself when the countdown reaches zero. */
+/** What to show at `nowMs` (server-corrected), re-derived every second between refetches. */
 export function viewAt(d: Downloader, nowMs: number): View {
-  if (d.status === "paused") return { kind: "paused", reason: d.needs_attention };
-  if (d.status === "unknown" || !d.next_run_at) return { kind: "unknown", installed: d.installed };
-  const start = Date.parse(d.next_run_at);
-  const end = d.window_end ? Date.parse(d.window_end) : start;
-  if (nowMs < start) return { kind: "countdown", remainingMs: start - nowMs, at: d.next_run_at, windowEnd: d.window_end };
-  if (nowMs <= end + 5 * 60_000) return { kind: "starting", windowEnd: d.window_end };
-  return { kind: "late", at: d.next_run_at };
+  switch (d.status) {
+    case "not_installed": return { kind: "not_installed" };
+    case "paused": return { kind: "paused", reason: d.needs_attention };
+    case "not_running": return { kind: "not_running", since: d.heartbeat_at };
+    case "downloading": return { kind: "downloading" };
+    case "requested": return { kind: "requested" };
+  }
+  if (!d.next_run_at) return { kind: "due" };
+  const remaining = Date.parse(d.next_run_at) - nowMs;
+  return remaining > 0 ? { kind: "countdown", remainingMs: remaining, at: d.next_run_at } : { kind: "due" };
 }
 
 function useNow(intervalMs = 1000): number {
@@ -35,90 +39,81 @@ function useNow(intervalMs = 1000): number {
   return now;
 }
 
+const TONE = {
+  countdown: "info", due: "good", downloading: "good", requested: "good",
+  paused: "critical", not_running: "critical", not_installed: "neutral",
+} as const;
+
 export function NextDownload() {
-  const q = useQuery({ queryKey: ["downloader"], queryFn: api.downloader, refetchInterval: 60_000 });
+  const qc = useQueryClient();
+  const toast = useToast();
+  const q = useQuery({ queryKey: ["downloader"], queryFn: api.downloader, refetchInterval: 30_000 });
   const [skew, setSkew] = useState(0);
   useEffect(() => {
-    if (q.data) setSkew(Date.parse(q.data.now) - Date.now());
+    if (q.data?.now) setSkew(Date.parse(q.data.now) - Date.now());
   }, [q.data, q.dataUpdatedAt]);
   const now = useNow() + skew;
+  const run = useMutation({
+    mutationFn: api.downloadNow,
+    onSuccess: (d) => qc.setQueryData(["downloader"], d),
+    onError: (e) => toast("warning", (e as Error).message),
+  });
   if (!q.data) return null;
 
   const d = q.data;
   const view = viewAt(d, now);
-  const jitterMin = d.jitter_seconds ? Math.round(d.jitter_seconds / 60) : 0;
   const lastOk = d.last_success_at ? <>Last successful download {ago(d.last_success_at, new Date(now))}.</> : null;
+  const canRequest = view.kind === "countdown" || view.kind === "due" || view.kind === "not_running";
+
+  let label = "Next download";
+  let big: string;
+  let detail: React.ReactNode;
+  switch (view.kind) {
+    case "countdown":
+      big = countdown(view.remainingMs);
+      label = "Next download in";
+      detail = <>At {clockTime(view.at)}.{(d.consecutive_failures ?? 0) > 0 && <> Retrying after {d.consecutive_failures} failed attempt{d.consecutive_failures === 1 ? "" : "s"}.</>} {lastOk}</>;
+      break;
+    case "due":
+      big = "starting now";
+      detail = <>The downloader picks it up within a few seconds. {lastOk}</>;
+      break;
+    case "downloading":
+      big = "downloading…";
+      detail = <>Chrome is fetching the file from Copart (about 100 MB); leave its window open. The run appears below once the file arrives.</>;
+      break;
+    case "requested":
+      big = "requested";
+      detail = <>Download now was requested; the downloader starts it within a few seconds.</>;
+      break;
+    case "paused":
+      label = "Downloads";
+      big = "paused";
+      detail = <>Copart {view.reason === "challenge" ? "showed a verification page" : "needs you to log in again"}. Run <code>{LOGIN_CMD}</code>. {lastOk}</>;
+      break;
+    case "not_running":
+      label = "Downloader";
+      big = "not running";
+      detail = <>No heartbeat {view.since ? <>since {clockTime(view.since)}</> : "yet"}. It restarts on its own (launchd) once the Mac is awake; if it doesn't, run <code>./start.sh</code>, which reinstalls it. A requested download waits until it is back. {lastOk}</>;
+      break;
+    default:
+      label = "Downloader";
+      big = "not set up";
+      detail = <>Run <code>./start.sh</code>: it installs the downloader on this Mac.</>;
+  }
 
   return (
     <div className={`card next-download ${view.kind}`} aria-live="polite">
-      {view.kind === "countdown" && (
-        <>
-          <span className="sev-info"><Icon tone="info" /></span>
-          <div>
-            <div className="nd-label">Next download in</div>
-            <div className="nd-countdown" role="timer">{countdown(view.remainingMs)}</div>
-          </div>
-          <div className="small ink-2">
-            Around {clockTime(view.at)}
-            {jitterMin > 0 && <> (starts within {jitterMin} min after, on purpose)</>}.
-            {(d.consecutive_failures ?? 0) > 0 && <> Retrying after {d.consecutive_failures} failed attempt{d.consecutive_failures === 1 ? "" : "s"}.</>}{" "}
-            {lastOk}
-          </div>
-        </>
-      )}
-      {view.kind === "starting" && (
-        <>
-          <span className="sev-good"><Icon tone="good" /></span>
-          <div>
-            <div className="nd-label">Next download</div>
-            <div className="nd-countdown">starting now</div>
-          </div>
-          <div className="small ink-2">
-            Random delay, at the latest {clockTime(view.windowEnd)}. The run appears below once
-            the file arrives. {lastOk}
-          </div>
-        </>
-      )}
-      {view.kind === "late" && (
-        <>
-          <span className="sev-warning"><Icon tone="warning" /></span>
-          <div>
-            <div className="nd-label">Next download</div>
-            <div className="nd-countdown">overdue</div>
-          </div>
-          <div className="small ink-2">
-            Expected around {clockTime(view.at)}, but the downloader hasn't woken up. Is the Mac
-            asleep, or was the schedule removed? ({INSTALL_CMD} reinstalls it.) {lastOk}
-          </div>
-        </>
-      )}
-      {view.kind === "paused" && (
-        <>
-          <span className="sev-critical"><Icon tone="critical" /></span>
-          <div>
-            <div className="nd-label">Downloads</div>
-            <div className="nd-countdown">paused</div>
-          </div>
-          <div className="small ink-2">
-            Copart {view.reason === "challenge" ? "showed a verification page" : "needs you to log in again"}.
-            Run <code>{LOGIN_CMD}</code>. {lastOk}
-          </div>
-        </>
-      )}
-      {view.kind === "unknown" && (
-        <>
-          <span className="muted"><Icon tone="neutral" /></span>
-          <div>
-            <div className="nd-label">Next download</div>
-            <div className="nd-countdown">not scheduled</div>
-          </div>
-          <div className="small ink-2">
-            {view.installed
-              ? <>The downloader has not been woken by its schedule yet. Re-run <code>{INSTALL_CMD}</code> to update the schedule.</>
-              : <>The downloader hasn't reported yet. Set it up with <code>{INSTALL_CMD}</code>.</>}{" "}
-            {lastOk}
-          </div>
-        </>
+      <span className={TONE[view.kind] === "neutral" ? "muted" : `sev-${TONE[view.kind]}`}><Icon tone={TONE[view.kind]} /></span>
+      <div>
+        <div className="nd-label">{label}</div>
+        <div className="nd-countdown" role={view.kind === "countdown" ? "timer" : undefined}>{big}</div>
+      </div>
+      <div className="small ink-2">{detail}</div>
+      {canRequest && (
+        <button className="nd-action" disabled={run.isPending} onClick={() => run.mutate()}>
+          Download now
+        </button>
       )}
     </div>
   );

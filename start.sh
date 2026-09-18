@@ -36,6 +36,30 @@ mkdir -p data/inbox/copart data/archive data/failed
 
 docker compose up --build --detach --wait
 
+# The Copart downloader runs on the Mac itself (it needs your Chrome), kept alive by launchd.
+# Make sure it is installed and current; SKIP_DOWNLOADER=1 ./start.sh skips this.
+ensure_downloader() {
+  local label="com.cars-ingest.copart-downloader"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  if [ "$(uname)" != "Darwin" ] || [ "${SKIP_DOWNLOADER:-0}" = "1" ]; then
+    DOWNLOADER_MSG="not managed here (macOS only, or SKIP_DOWNLOADER=1)"
+    return
+  fi
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 \
+      && grep -q "<string>daemon</string>" "$plist" 2>/dev/null \
+      && grep -q "<string>$(pwd)/backend/.venv/bin/python</string>" "$plist" 2>/dev/null; then
+    DOWNLOADER_MSG="running (kept alive by launchd)"
+    return
+  fi
+  echo "Installing the Copart downloader (launchd keeps it running from now on)..."
+  if ./scripts/install_downloader.sh >/dev/null; then
+    DOWNLOADER_MSG="installed and running"
+  else
+    DOWNLOADER_MSG="NOT installed: run ./scripts/install_downloader.sh to see why"
+  fi
+}
+ensure_downloader
+
 cat <<MSG
 
   Pipeline is running.
@@ -43,6 +67,7 @@ cat <<MSG
   Dashboard   http://localhost:${DASHBOARD_PORT:-8080}
   Login       ${DASHBOARD_USERNAME:-admin} / ${DASHBOARD_PASSWORD}   (stored in .env)
   Inbox       $(pwd)/data/inbox/copart/   <- save Copart CSV exports here
+  Downloader  ${DOWNLOADER_MSG}
 
   Try it:     cp ~/Downloads/salesdata.csv data/inbox/copart/
               python3 scripts/simulate_export.py      # a realistic "next hour" export

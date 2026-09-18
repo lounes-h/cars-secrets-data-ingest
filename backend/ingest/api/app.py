@@ -20,9 +20,8 @@ from pydantic import BaseModel
 
 from ..config import Settings, get_settings
 from ..db import EVENTS_CHANNEL
-from ..downloader.schedule import next_run
 from ..log_config import configure_logging
-from ..monitor import run_checks
+from ..monitor import downloader_status, run_checks
 from ..providers import PROVIDERS
 from . import auth
 
@@ -80,13 +79,18 @@ class EventBroker:
 
 
 async def monitor_loop(pool: ConnectionPool, settings: Settings) -> None:
-    def check() -> None:
+    def check(after_sleep: bool) -> None:
         with pool.connection() as conn:
-            run_checks(conn, settings)
+            run_checks(conn, settings, after_sleep=after_sleep)
 
+    last = None
     while True:
+        # A long gap between rounds means the machine slept (Docker sleeps with the Mac).
+        now = time.time()
+        after_sleep = last is not None and now - last > 3 * settings.monitor_interval_seconds
+        last = now
         try:
-            await asyncio.to_thread(check)
+            await asyncio.to_thread(check, after_sleep)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -214,10 +218,16 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
                 "last_run": last_run, "last_success_at": last_success, "lots_active": active,
                 "stale_after_minutes": settings.stale_after_minutes,
             })
+        dl = downloader_summary(conn)
+        downloader_ok = dl["status"] in ("scheduled", "downloading", "requested")
         health = ("down" if alerts.get("critical") or not (worker and worker["healthy"])
+                  or (dl["installed"] and not downloader_ok)
                   else "degraded" if alerts.get("warning") else "healthy")
         return {
             "health": health, "worker": worker, "providers": providers, "lots": lots,
+            "downloader": {k: dl.get(k) for k in (
+                "status", "installed", "heartbeat_at", "next_run_at", "last_success_at",
+                "needs_attention", "run_requested_at")},
             "alerts_open": {s: alerts.get(s, 0) for s in ("critical", "warning", "info")},
             "now": conn.execute("SELECT now() AS now").fetchone()["now"],
         }
@@ -287,22 +297,33 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         return {"status": "requeued", "file": target.name}
 
     # --- downloader ------------------------------------------------------------------------------
-    @api.get("/downloader")
-    def downloader(conn: Conn) -> dict[str, Any]:
-        """Next expected download, from the status the host-side downloader publishes."""
+    def downloader_summary(conn: psycopg.Connection) -> dict[str, Any]:
         now = conn.execute("SELECT now() AS now").fetchone()["now"]
         row = conn.execute(
             "SELECT * FROM downloader_status WHERE source = 'copart'").fetchone()
-        if row is None:
-            return {"installed": False, "now": now, "status": "unknown",
-                    "next_run_at": None, "window_end": None}
-        nxt = next_run(
-            now, last_invocation=row["last_invocation_at"],
-            interval_s=row["schedule_interval_seconds"], jitter_s=row["jitter_seconds"] or 0,
-            next_allowed=row["next_allowed_at"], needs_attention=row["needs_attention"],
-        )
-        return {"installed": True, "now": now, "status": nxt.status, "next_run_at": nxt.at,
-                "window_end": nxt.window_end, **row}
+        status = downloader_status(row, now, settings.downloader_timeout_seconds)
+        return {"now": now, "status": status, "installed": row is not None, **(row or {})}
+
+    @api.get("/downloader")
+    def downloader(conn: Conn) -> dict[str, Any]:
+        """What the host-side downloader is doing and when it downloads next."""
+        return downloader_summary(conn)
+
+    @api.post("/downloader/run", status_code=202)
+    def downloader_run(conn: Conn, user: User) -> dict[str, Any]:
+        """Ask the downloader to download now; it picks the request up within seconds."""
+        summary = downloader_summary(conn)
+        if not summary["installed"]:
+            raise HTTPException(409, "the downloader is not set up on this machine")
+        if summary["status"] == "paused":
+            raise HTTPException(409, "downloads are paused until you log in to Copart again")
+        if summary["status"] == "downloading":
+            raise HTTPException(409, "a download is already in progress")
+        conn.execute(
+            """UPDATE downloader_status SET run_requested_at = now(), run_requested_by = %s
+               WHERE source = 'copart'""", (user,))
+        conn.execute("SELECT pg_notify(%s, %s)", (EVENTS_CHANNEL, '{"type":"downloader"}'))
+        return downloader_summary(conn)
 
     # --- alerts ----------------------------------------------------------------------------------
     @api.get("/alerts")

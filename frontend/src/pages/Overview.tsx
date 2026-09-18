@@ -1,30 +1,64 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { RunCharts } from "../components/RunCharts";
 import { Icon, QueryState, RunStatusBadge, SeverityBadge, StatTile } from "../components/ui";
-import { api, type Overview } from "../lib/api";
-import { ago, compact, dateTime, int } from "../lib/format";
+import { api, type Downloader, type Overview } from "../lib/api";
+import { ago, clockTime, compact, dateTime, int } from "../lib/format";
 
 const HEALTH = {
   healthy: { tone: "good", title: "Pipeline healthy", text: "No open warnings or critical alerts." },
   degraded: { tone: "warning", title: "Pipeline degraded", text: "Open warnings need a look." },
-  down: { tone: "critical", title: "Pipeline needs attention", text: "Critical alerts are open or the worker is silent." },
+  down: { tone: "critical", title: "Pipeline needs attention", text: "Critical alerts are open, or the worker or downloader is not running." },
 } as const;
+
+type Tone = "good" | "warning" | "critical" | "info" | "neutral";
+
+/** One line per background process: [tone, text]. */
+export function downloaderLine(d: Downloader): [Tone, ReactNode] {
+  switch (d.status) {
+    case "scheduled":
+      return ["good", <>Downloader running · next download at {clockTime(d.next_run_at)}</>];
+    case "downloading":
+      return ["good", <>Downloader running · downloading now</>];
+    case "requested":
+      return ["good", <>Downloader running · download requested</>];
+    case "paused":
+      return ["critical", <>Downloader paused · Copart needs you to log in again</>];
+    case "not_running":
+      return ["critical", <>Downloader not running{d.heartbeat_at ? <> since {clockTime(d.heartbeat_at)}</> : null} · it restarts on its own; otherwise run <code>./start.sh</code></>];
+    default:
+      return ["neutral", <>Downloader not set up · run <code>./start.sh</code> to install it</>];
+  }
+}
+
+function StatusLine({ tone, children }: { tone: Tone; children: ReactNode }) {
+  return (
+    <div className="ink-2 small status-line">
+      <span className={tone === "neutral" ? "muted" : `sev-${tone}`}><Icon tone={tone} /></span>
+      <span>{children}</span>
+    </div>
+  );
+}
 
 function HealthBanner({ data }: { data: Overview }) {
   const h = HEALTH[data.health];
   const worker = data.worker;
+  const [dlTone, dlText] = downloaderLine(data.downloader);
   return (
     <div className={`banner ${data.health}`}>
       <span className={`sev-${h.tone}`}><Icon tone={h.tone} /></span>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1 }} className="banner-lines">
         <strong>{h.title}</strong>
-        <div className="ink-2 small">
-          {h.text}{" "}
+        <div className="ink-2 small">{h.text}</div>
+        <StatusLine tone={worker?.healthy ? "good" : "critical"}>
           {worker
-            ? <>Worker {worker.healthy ? "alive" : "silent"} · last heartbeat {ago(worker.last_beat_at)} · {worker.state}</>
+            ? <>Worker {worker.healthy ? "running" : "not running"} · last heartbeat {ago(worker.last_beat_at)} · {worker.state}</>
             : <>No worker has reported yet.</>}
-        </div>
+        </StatusLine>
+        <StatusLine tone={dlTone}>
+          <Link to="/runs" className="plain-link">{dlText}</Link>
+        </StatusLine>
       </div>
       {(data.alerts_open.critical > 0 || data.alerts_open.warning > 0) && (
         <Link to="/alerts">

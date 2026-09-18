@@ -1,5 +1,4 @@
 import dataclasses
-from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -181,26 +180,50 @@ def test_ttl_cache_expires_and_is_bounded():
     assert cache.get("b") is None and cache.get("d") == 4
 
 
-def test_downloader_next_run(authed, conn):
-    assert authed.get("/api/downloader").json()["status"] == "unknown"  # not installed yet
-    conn.execute("""INSERT INTO downloader_status (source, last_invocation_at,
-                        schedule_interval_seconds, jitter_seconds, last_attempt_at,
-                        next_allowed_at)
-                    VALUES ('copart', now() - interval '10 minutes', 3600, 300,
-                            now() - interval '9 minutes', now() + interval '36 minutes')""")
+def test_downloader_status_and_download_now(authed, conn):
     body = authed.get("/api/downloader").json()
-    assert body["installed"] and body["status"] == "scheduled"
-    now = datetime.fromisoformat(body["now"])
+    assert (body["status"], body["installed"]) == ("not_installed", False)
+    assert authed.post("/api/downloader/run").status_code == 409
 
-    def about(value, expected):  # inserted and read in two statements, ms apart
-        return abs(datetime.fromisoformat(value) - now - expected) < timedelta(seconds=5)
+    conn.execute("""INSERT INTO downloader_status (source, heartbeat_at, activity, next_run_at)
+                    VALUES ('copart', now(), 'idle', now() + interval '50 minutes')""")
+    body = authed.get("/api/downloader").json()
+    assert body["status"] == "scheduled" and body["next_run_at"]
 
-    assert about(body["next_run_at"], timedelta(minutes=50))
-    assert about(body["window_end"], timedelta(minutes=55))
+    r = authed.post("/api/downloader/run")
+    assert r.status_code == 202 and r.json()["status"] == "requested"
+    assert conn.execute("SELECT run_requested_by FROM downloader_status"
+                        ).fetchone()["run_requested_by"] == "admin"
+
+    conn.execute("UPDATE downloader_status SET activity = 'downloading'")
+    assert authed.get("/api/downloader").json()["status"] == "downloading"
+    assert authed.post("/api/downloader/run").status_code == 409
 
     conn.execute("UPDATE downloader_status SET needs_attention = 'challenge'")
     assert authed.get("/api/downloader").json()["status"] == "paused"
+    assert "log in" in authed.post("/api/downloader/run").json()["detail"]
+
+    conn.execute("""UPDATE downloader_status SET needs_attention = NULL, activity = 'idle',
+                    heartbeat_at = now() - interval '10 minutes'""")
+    assert authed.get("/api/downloader").json()["status"] == "not_running"
+
+
+def test_overview_reports_downloader_and_counts_it_in_health(authed, conn):
+    conn.execute("""INSERT INTO worker_heartbeat (worker_id, started_at, last_beat_at, state)
+                    VALUES ('w', now(), now(), 'idle')""")
+    overview = authed.get("/api/overview").json()
+    assert overview["downloader"]["status"] == "not_installed"
+    assert overview["health"] == "healthy"  # not set up is not a failure of the pipeline
+
+    conn.execute("""INSERT INTO downloader_status (source, heartbeat_at, activity)
+                    VALUES ('copart', now(), 'idle')""")
+    assert authed.get("/api/overview").json()["health"] == "healthy"
+    conn.execute("UPDATE downloader_status SET heartbeat_at = now() - interval '1 hour'")
+    overview = authed.get("/api/overview").json()
+    assert overview["downloader"]["status"] == "not_running"
+    assert overview["health"] == "down"
 
 
 def test_downloader_status_requires_login(client):
     assert client.get("/api/downloader").status_code == 401
+    assert client.post("/api/downloader/run").status_code == 401

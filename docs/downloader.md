@@ -41,25 +41,41 @@ downloader that silently stopped.
 ## Setup (macOS)
 
 ```bash
-./start.sh                                   # pipeline must be running (creates .env)
-./scripts/install_downloader.sh              # installs Playwright, schedules hourly runs
-cd backend && .venv/bin/python -m ingest.downloader login       # log in once, by hand
-cd backend && .venv/bin/python -m ingest.downloader run --force # first download now
+./start.sh                                   # starts everything, installs the downloader
+cd backend && .venv/bin/python -m ingest.downloader login       # log in to Copart once
 ```
 
 `login` opens a Chrome window on Copart. If Chrome fills in your saved email and password,
 Sign in is clicked for you; otherwise log in as usual. The window closes itself once the
 download button is reachable.
 
-## Next download on the dashboard
+## Always running, restarted automatically
 
-The Runs page shows a countdown to the next download. Every scheduled wake-up
-(`run --scheduled`) and every attempt writes the downloader's state to the `downloader_status`
-table. The API works out the first wake-up at or after the earliest time pacing allows
-(`ingest/downloader/schedule.py`). The card also shows when downloads are **paused** (log in),
-**overdue** (no wake-up: the Mac is asleep or the schedule was removed) or **not scheduled**
-(the schedule predates this feature: re-run `./scripts/install_downloader.sh`, which also
-records the install time so the countdown starts right away).
+The downloader is a small always-on process (`python -m ingest.downloader daemon`):
+
+- **launchd keeps it alive.** It starts when you log in to the Mac, and launchd restarts it
+  within a minute if it crashes or is killed (`KeepAlive`).
+- **`./start.sh` checks it.** If it is not installed, or installed in an older form, the
+  script installs it (`SKIP_DOWNLOADER=1 ./start.sh` skips this).
+- **It plans its own downloads.** Every hour plus a random 0–5 min, never within 45 min of
+  the previous one, later after failures (backoff). If the Mac slept through a planned
+  download, it downloads once, a minute after waking (so the network is back first).
+- **It reports a heartbeat** every 30 s, with its plan, to the `downloader_status` table.
+
+On the dashboard:
+- **Overview** has a *Downloader running · next download at …* line next to the worker's.
+  "Not running" or "paused" turns the pipeline health red.
+- **Runs page:** a live countdown and a **Download now** button. The process picks the request
+  up within seconds; the button isn't offered while downloads are paused for a login.
+- **Alerts:** `downloader_down` (critical) when the heartbeat stops for 2.5 min; it resolves
+  itself when the process is back. Right after the Mac wakes, the check waits a round so a
+  sleeping Mac isn't reported as a failure.
+
+Only one process uses the Chrome profile at a time (a lock), so a manual `run` or `login`
+while the always-on process is downloading is refused with "try again in a minute".
+
+What automation cannot do: if the Mac is **off, asleep or logged out**, nothing runs, not even
+the dashboard, because Docker sleeps with it. Everything resumes on its own when you're back.
 
 ## Day to day
 
@@ -68,11 +84,13 @@ records the install time so the countdown starts right away).
 | Normal | A new run every hour on the dashboard | Nothing |
 | Session expired or verification page | Critical alert "downloads paused until you log in again" | Run `login` |
 | Download failing | Warning, then critical, "Copart download failed (N× in a row)" | Check `~/Library/Logs/cars-ingest/downloader.log`; if Copart changed the page, update the button text in `ingest/downloader/browser.py` |
-| Mac asleep | Runs resume on wake; "no new file" alert if asleep over 75 min | Nothing, or keep the Mac awake |
+| Mac asleep | One catch-up download a minute after waking | Nothing, or keep the Mac awake |
+| Downloader not running | Critical alert, red line on Overview | Usually nothing: launchd restarts it. Otherwise `./start.sh` |
 
 ```bash
 cd backend && .venv/bin/python -m ingest.downloader status   # last attempt/success, next run
-./scripts/install_downloader.sh --uninstall                  # stop scheduled downloads
+cd backend && .venv/bin/python -m ingest.downloader run --force   # one download now (or the button)
+./scripts/install_downloader.sh --uninstall                  # stop and remove the downloader
 ```
 
 ## Configuration (`.env`)

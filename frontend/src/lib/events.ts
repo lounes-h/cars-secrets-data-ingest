@@ -13,7 +13,7 @@ export function queriesFor(event: PipelineEvent): string[][] {
     case "run_finished":
       return [["overview"], ["runs"], ["run"], ["lots"], ["lot"], ["schema"], ["downloader"]];
     case "downloader":
-      return [["downloader"]];
+      return [["downloader"], ["overview"]];
     case "alert":
     case "alert_resolved":
     case "alert_updated":
