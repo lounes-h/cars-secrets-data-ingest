@@ -4,7 +4,7 @@
 It changes the high bid of some lots, drops some (sold), adds new lots, and writes the file
 atomically (temp name + rename), exactly like a well-behaved downloader should.
 
-    python scripts/simulate_export.py                       # salesdata.csv -> data/inbox/copart/
+    python scripts/simulate_export.py                       # newest archived export -> inbox
     python scripts/simulate_export.py --changed 500 --removed 1000 --added 200
     python scripts/simulate_export.py --add-column "Seller Rating" --drop-column Trim
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import os
 import random
 from datetime import UTC, datetime
@@ -23,9 +24,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def newest_archived_export() -> Path:
+    archived = sorted((ROOT / "data" / "archive" / "copart").rglob("*.csv.gz"),
+                      key=lambda p: p.stat().st_mtime)
+    if not archived:
+        raise SystemExit("No archived export yet: ingest one first, or pass --source <file.csv>")
+    return archived[-1]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--source", type=Path, default=ROOT / "salesdata.csv")
+    ap.add_argument("--source", type=Path, default=None,
+                    help="CSV or .csv.gz to derive from (default: newest file in data/archive)")
     ap.add_argument("--inbox", type=Path, default=ROOT / "data" / "inbox" / "copart")
     ap.add_argument("--changed", type=int, default=500, help="lots whose high bid changes")
     ap.add_argument("--removed", type=int, default=1000, help="lots left out (sold/withdrawn)")
@@ -36,7 +46,9 @@ def main() -> None:
     args = ap.parse_args()
     rng = random.Random(args.seed)
 
-    with open(args.source, newline="", encoding="utf-8") as fh:
+    source = args.source or newest_archived_export()
+    opener = gzip.open if source.suffix == ".gz" else open
+    with opener(source, "rt", newline="", encoding="utf-8") as fh:
         reader = csv.reader(fh)
         header = next(reader)
         rows = [r for r in reader if len(r) == len(header)]
