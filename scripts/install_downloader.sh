@@ -49,6 +49,8 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 launchctl bootstrap "$DOMAIN" "$PLIST"
+# The first wake-up is one interval from now: tell the dashboard, so its countdown is right.
+(cd backend && .venv/bin/python -m ingest.downloader mark-scheduled --every 3600 --jitter 300)
 
 cat <<MSG
 Downloader scheduled: every hour (plus up to 5 min random delay), at most once per 45 min.

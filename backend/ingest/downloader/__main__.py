@@ -226,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--every", type=int, default=3600,
                      help="scheduler interval in seconds (with --scheduled)")
     sub.add_parser("status", help="show pacing state")
+    mark = sub.add_parser("mark-scheduled",
+                          help="record that the schedule was (re)installed now (install script)")
+    mark.add_argument("--every", type=int, default=3600)
+    mark.add_argument("--jitter", type=int, default=0)
     args = parser.parse_args(argv)
 
     configure_logging()
@@ -234,6 +238,11 @@ def main(argv: list[str] | None = None) -> int:
         return login(settings)
     if args.command == "status":
         return status(settings)
+    if args.command == "mark-scheduled":
+        # launchd starts its interval when the job is loaded: the first wake-up is `every`
+        # seconds from now, exactly as if it had just woken up.
+        record_invocation(settings, datetime.now(UTC), args.every, args.jitter)
+        return OK
     if args.scheduled:
         record_invocation(settings, datetime.now(UTC), args.every, args.jitter)
     time.sleep(jitter_seconds(args.jitter))

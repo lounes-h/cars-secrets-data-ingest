@@ -58,7 +58,8 @@ The Runs page shows a countdown to the next download. Every scheduled wake-up
 table. The API works out the first wake-up at or after the earliest time pacing allows
 (`ingest/downloader/schedule.py`). The card also shows when downloads are **paused** (log in),
 **overdue** (no wake-up: the Mac is asleep or the schedule was removed) or **not scheduled**
-(the schedule predates this feature: re-run `./scripts/install_downloader.sh`).
+(the schedule predates this feature: re-run `./scripts/install_downloader.sh`, which also
+records the install time so the countdown starts right away).
 
 ## Day to day
 
