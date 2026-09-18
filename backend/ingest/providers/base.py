@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..schema import COLUMN_INDEX
+
+# Looks up the raw value of the first alias present in the file, or None.
+RawGetter = Callable[[tuple[str, ...]], str | None]
+
+
+@dataclass(frozen=True)
+class FieldMapping:
+    """One canonical column fed by the first matching (normalized) source header."""
+
+    column: str
+    aliases: tuple[str, ...]
+    convert: Callable[[str], Any]
+
+    def __post_init__(self) -> None:
+        if self.column not in COLUMN_INDEX:
+            raise ValueError(f"unknown canonical column {self.column!r}")
+
+
+@dataclass(frozen=True)
+class Provider:
+    """Everything provider-specific about turning an export into `lots` rows.
+
+    A provider is chosen by the inbox sub-folder a file lands in (`inbox/<name>/`).
+    """
+
+    name: str
+    display_name: str
+    # Normalized headers that may hold the lot identifier, in order of preference.
+    key_aliases: tuple[str, ...]
+    # Validates/normalizes the raw lot identifier; returns None if it is unusable.
+    key_convert: Callable[[str], str | None]
+    fields: tuple[FieldMapping, ...]
+    # Source columns that carry no information about the lot (e.g. a row counter): not stored.
+    ignored_columns: frozenset[str] = frozenset()
+    # Stored, but a different value is not a change of the lot (e.g. export batch timestamps).
+    volatile_columns: frozenset[str] = frozenset()
+    # Computes canonical columns that need several source values; mutates `values`.
+    derive: Callable[[RawGetter, dict[str, Any]], None] | None = None
+    # Normalized source header -> canonical column it feeds through `derive`.
+    derived_sources: dict[str, str] = field(default_factory=dict)
+    # A lot missing from an export is marked removed only if the export covers its scope
+    # (e.g. its yard). None: every export is a full snapshot of the provider's inventory.
+    removal_scope: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.removal_scope is not None and self.removal_scope not in COLUMN_INDEX:
+            raise ValueError(f"unknown removal scope column {self.removal_scope!r}")
+
+    def mapped_to(self, normalized: str) -> str | None:
+        """Canonical column a normalized source header feeds, if any (for the registry)."""
+        if normalized in self.key_aliases:
+            return "lot_number"
+        for mapping in self.fields:
+            if normalized in mapping.aliases:
+                return mapping.column
+        return self.derived_sources.get(normalized)

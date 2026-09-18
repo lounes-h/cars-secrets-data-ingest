@@ -1,0 +1,137 @@
+import pytest
+from fastapi.testclient import TestClient
+
+from ingest.api.app import create_app, diff_attributes
+from ingest.pipeline import process_file
+from ingest.providers import COPART
+
+from .conftest import read_sample
+
+
+@pytest.fixture
+def client(conn, settings):
+    with TestClient(create_app(settings, background=False)) as c:
+        yield c
+
+
+@pytest.fixture
+def authed(client):
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
+    assert r.status_code == 200
+    return client
+
+
+def test_health_is_public(client):
+    assert client.get("/api/health").json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("path", ["/api/overview", "/api/runs", "/api/alerts", "/api/schema",
+                                  "/api/lots", "/api/auth/me", "/api/events"])
+def test_everything_else_requires_login(client, path):
+    assert client.get(path).status_code == 401
+
+
+def test_login_sets_http_only_strict_cookie(client):
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=strict" in cookie
+    assert client.get("/api/auth/me").json() == {"username": "admin"}
+    client.post("/api/auth/logout")
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_login_rejects_bad_password_and_rate_limits(client):
+    for _ in range(10):
+        r = client.post("/api/auth/login", json={"username": "admin", "password": "nope"})
+        assert r.status_code == 401
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
+    assert r.status_code == 429
+
+
+def test_forged_cookie_is_rejected(client):
+    client.cookies.set("ingest_session", "forged.token.value")
+    assert client.get("/api/overview").status_code == 401
+
+
+def test_overview_runs_and_lots(authed, conn, settings, make_export):
+    header, rows = read_sample()
+    first = process_file(conn, make_export(rows), COPART, settings)
+    changed = [list(r) for r in rows]
+    changed[0][header.index("High Bid =non-vix,Sealed=Vix")] = "4242.0"
+    process_file(conn, make_export(changed), COPART, settings)
+
+    overview = authed.get("/api/overview").json()
+    assert overview["lots"]["active"] == 300
+    assert overview["lots"]["changed_24h"] == 1
+    (provider,) = overview["providers"]
+    assert provider["source"] == "copart" and provider["display_name"] == "Copart"
+    assert provider["last_run"]["rows_updated"] == 1
+    assert overview["health"] == "down"  # no worker heartbeat in tests
+
+    runs = authed.get("/api/runs").json()
+    assert runs["total"] == 2 and runs["items"][0]["rows_updated"] == 1
+    assert authed.get("/api/runs", params={"status": "failed"}).json()["total"] == 0
+    detail = authed.get(f"/api/runs/{first.file_id}").json()
+    assert detail["run"]["rows_new"] == 300 and detail["rejected_rows"] == []
+    assert authed.get("/api/runs/99999").status_code == 404
+
+    lot_number = rows[0][header.index("Lot number")]
+    found = authed.get("/api/lots", params={"q": lot_number}).json()["items"]
+    assert [lot["lot_number"] for lot in found] == [lot_number]
+    assert authed.get("/api/lots", params={"q": "acu"}).json()["items"]
+    assert authed.get("/api/lots", params={"q": "%"}).json()["items"] == []  # LIKE escaped
+
+    lot = authed.get(f"/api/lots/copart/{lot_number}").json()
+    (change,) = lot["history"]
+    assert {"field": "high_bid_non_vix_sealed_vix", "old": "0", "new": "4242"} in change["changes"]
+    assert authed.get("/api/lots/copart/0").status_code == 404
+
+    schema = authed.get("/api/schema").json()["items"]
+    assert len(schema) == 59
+
+
+def test_alert_ack_and_resolve(authed, conn):
+    conn.execute("""INSERT INTO alerts (severity, type, title, fingerprint)
+                    VALUES ('warning', 't', 'something', 'fp')""")
+    alert_id = authed.get("/api/alerts").json()["items"][0]["id"]
+    acked = authed.post(f"/api/alerts/{alert_id}/ack").json()
+    assert acked["acked_by"] == "admin"
+    resolved = authed.post(f"/api/alerts/{alert_id}/resolve").json()
+    assert resolved["resolved_by"] == "admin"
+    assert authed.get("/api/alerts").json()["total"] == 0
+    assert authed.get("/api/alerts", params={"state": "resolved"}).json()["total"] == 1
+    assert authed.post(f"/api/alerts/{alert_id}/resolve").status_code == 404
+
+
+def test_retry_moves_failed_file_back_to_inbox(authed, conn, settings, make_export):
+    path = make_export(header=["nothing", "useful"], rows=[["1", "2"]], name="bad.csv")
+    outcome = process_file(conn, path, COPART, settings)
+    assert outcome.status == "failed"
+
+    r = authed.post(f"/api/runs/{outcome.file_id}/retry")
+    assert r.status_code == 202
+    assert (settings.inbox_dir / "copart" / "bad.csv").exists()
+    # the file is gone from failed/, a second retry has nothing to move
+    assert authed.post(f"/api/runs/{outcome.file_id}/retry").status_code == 409
+
+
+def test_retry_refuses_non_failed_runs(authed, conn, settings, make_export):
+    outcome = process_file(conn, make_export(), COPART, settings)
+    assert authed.post(f"/api/runs/{outcome.file_id}/retry").status_code == 409
+
+
+def test_retry_refuses_paths_outside_failed_dir(authed, conn, settings, tmp_path):
+    outside = tmp_path / "secret.csv"
+    outside.write_text("x")
+    file_id = conn.execute(
+        """INSERT INTO ingest_files (source, filename, sha256, status, archived_path)
+           VALUES ('copart', 'secret.csv', 'x', 'failed', %s) RETURNING id""", (str(outside),),
+    ).fetchone()["id"]
+    assert authed.post(f"/api/runs/{file_id}/retry").status_code == 409
+    assert outside.exists()
+
+
+def test_diff_attributes():
+    assert diff_attributes({"a": "1", "b": "2"}, {"a": "1", "b": "3", "c": "4"}) == [
+        {"field": "b", "old": "2", "new": "3"}, {"field": "c", "old": None, "new": "4"},
+    ]
