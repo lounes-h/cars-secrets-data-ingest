@@ -159,7 +159,13 @@ def status(settings: DownloaderSettings) -> int:
     print(f"last attempt:  {state.last_attempt_at or 'never'}")
     print(f"last success:  {state.last_success_at or 'never'}")
     print(f"failures:      {state.consecutive_failures} in a row")
-    print(f"next attempt:  {'paused -- needs login' if allowed is None else allowed.isoformat()}")
+    if allowed is None:
+        nxt = "paused -- needs login"
+    elif state.last_attempt_at is None:
+        nxt = "now (never ran) -- at the next scheduled run"
+    else:
+        nxt = allowed.isoformat()
+    print(f"next attempt:  {nxt}")
     return OK
 
 

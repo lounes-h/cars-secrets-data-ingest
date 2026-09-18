@@ -247,3 +247,14 @@ def test_alerts_are_skipped_quietly_without_database(tmp_path):
 def test_db_url_built_from_compose_env():
     s = DownloaderSettings(_env_file=None, postgres_password="pw", postgres_port=5433)
     assert s.db_url == "postgresql://ingest:pw@127.0.0.1:5433/ingest"
+
+
+def test_status_is_readable(dsettings, capsys):
+    cli.status(dsettings)
+    assert "now (never ran)" in capsys.readouterr().out
+    State(needs_attention="challenge").save(dsettings.state_file)
+    cli.status(dsettings)
+    assert "paused -- needs login" in capsys.readouterr().out
+    State(last_attempt_at=T0.isoformat()).save(dsettings.state_file)
+    cli.status(dsettings)
+    assert "2026-09-18T12:45:00+00:00" in capsys.readouterr().out
