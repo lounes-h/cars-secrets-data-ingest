@@ -38,6 +38,13 @@ image URLs on its image host (`cs.copart.com`). The response is capped at 2 MB w
 timeout. The CSP `img-src` allows that image host and nothing else, and images load with
 `referrerPolicy="no-referrer"`.
 
+## Copart session (downloader)
+
+The downloader keeps Copart's session cookie in a dedicated Chrome profile at
+`~/.cars-ingest/copart-profile` (mode 700), outside the repository. No Copart password is
+stored anywhere: a person logs in by hand. The downloader never enters credentials and never
+interacts with CAPTCHAs or bot checks. Such a page pauses it and raises an alert.
+
 ## Network
 
 Compose publishes only the dashboard (8080) and Postgres (5433), both on `127.0.0.1`. The API
