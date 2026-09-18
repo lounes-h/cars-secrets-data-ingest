@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { Gallery } from "../components/Gallery";
 import { Badge, QueryState, Segmented } from "../components/ui";
 import { api } from "../lib/api";
 import { dateTime, int, money } from "../lib/format";
@@ -45,7 +46,7 @@ export function LotsPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Lot</th><th>Vehicle</th><th>VIN</th><th>Damage</th><th className="num">Odometer</th>
+                  <th><span className="visually-hidden">Photo</span></th><th>Lot</th><th>Vehicle</th><th>VIN</th><th>Damage</th><th className="num">Odometer</th>
                   <th className="num">High bid</th><th>Yard</th><th>Sale</th><th>Last change</th><th>State</th>
                 </tr>
               </thead>
@@ -53,6 +54,9 @@ export function LotsPage() {
                 {lots.data.items.map((l) => (
                   <tr key={`${l.source}/${l.lot_number}`} className="clickable"
                     onClick={() => navigate(`/lots/${l.source}/${l.lot_number}`)}>
+                    <td>{l.thumbnail_url
+                      ? <img className="lot-thumb" src={l.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                      : <div className="lot-thumb" />}</td>
                     <td><Link to={`/lots/${l.source}/${l.lot_number}`}>{l.lot_number}</Link>
                       <div className="muted small">{l.source}</div></td>
                     <td>{[l.year, l.make, l.model_group].filter(Boolean).join(" ")}
@@ -68,7 +72,7 @@ export function LotsPage() {
                   </tr>
                 ))}
                 {lots.data.items.length === 0 && (
-                  <tr><td colSpan={10} className="empty">No lots match.</td></tr>
+                  <tr><td colSpan={11} className="empty">No lots match.</td></tr>
                 )}
               </tbody>
             </table>
@@ -87,20 +91,31 @@ export function LotsPage() {
 export function LotDetailPage() {
   const { source = "", lotNumber = "" } = useParams();
   const q = useQuery({ queryKey: ["lot", source, lotNumber], queryFn: () => api.lot(source, lotNumber) });
+  const photos = useQuery({
+    queryKey: ["lot-images", source, lotNumber],
+    queryFn: () => api.lotImages(source, lotNumber),
+    staleTime: 15 * 60_000,
+  });
   if (!q.data) return <QueryState isLoading={q.isLoading} error={q.error} />;
   const { lot, history } = q.data;
   const attributes = Object.entries(lot.attributes).sort(([a], [b]) => a.localeCompare(b));
+  const title = [lot.year, lot.make, lot.model_group, lot.model_detail].filter(Boolean).join(" ");
 
   return (
     <div className="stack">
       <div className="topbar">
         <h1>
-          {[lot.year, lot.make, lot.model_group, lot.model_detail].filter(Boolean).join(" ")}{" "}
+          {title}{" "}
           <span className="muted">· lot {lot.lot_number}</span>
         </h1>
         {lot.removed_at ? <Badge tone="neutral">removed {dateTime(lot.removed_at)}</Badge> : <Badge tone="good">active</Badge>}
       </div>
       <div className="grid two-col">
+        <div className="card">
+          {photos.isLoading
+            ? <div className="gallery-empty muted">Loading photos…</div>
+            : <Gallery images={photos.data?.images ?? []} alt={title} />}
+        </div>
         <div className="card">
           <h2>Summary</h2>
           <dl className="kv">
@@ -117,7 +132,8 @@ export function LotDetailPage() {
             <dt>Last seen</dt><dd>{dateTime(lot.last_seen_at)} · <Link to={`/runs/${lot.last_file_id}`}>run #{lot.last_file_id}</Link></dd>
           </dl>
         </div>
-        <div className="card">
+      </div>
+      <div className="card">
           <h2>Change history</h2>
           {history.length === 0 && <div className="muted">Unchanged since first seen.</div>}
           {history.map((h, i) => (
@@ -138,7 +154,6 @@ export function LotDetailPage() {
               </table>
             </div>
           ))}
-        </div>
       </div>
       <details className="card">
         <summary>All {attributes.length} source values</summary>

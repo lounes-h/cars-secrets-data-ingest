@@ -25,7 +25,13 @@ interface Point {
   duration: number;
 }
 
-function toPoints(runs: Run[]): Point[] {
+/** The run that first loads a provider only has new lots; plotted with the rest, its
+ * ~100k bar flattens every hourly run to nothing, so the chart leaves it out. */
+export function isInitialLoad(r: Run): boolean {
+  return (r.rows_new ?? 0) > 0 && !r.rows_updated && !r.rows_unchanged;
+}
+
+export function toPoints(runs: Run[]): Point[] {
   return runs
     .filter((r) => r.status === "succeeded")
     .slice()
@@ -97,6 +103,8 @@ function DataTable({ points }: { points: Point[] }) {
 export function RunCharts({ runs }: { runs: Run[] }) {
   const [asTable, setAsTable] = useState(false);
   const points = toPoints(runs);
+  const initial = runs.filter((r) => r.status === "succeeded" && isInitialLoad(r));
+  const changePoints = toPoints(runs.filter((r) => !isInitialLoad(r)));
   if (points.length === 0) {
     return <div className="card empty">No successful runs yet. Drop an export into the inbox.</div>;
   }
@@ -127,7 +135,7 @@ export function RunCharts({ runs }: { runs: Run[] }) {
         <div style={{ height: 240 }} role="img"
           aria-label="Stacked columns of new, updated and removed lots for each recent run">
           <ResponsiveContainer>
-            <BarChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barCategoryGap="20%">
+            <BarChart data={changePoints} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barCategoryGap="20%">
               <CartesianGrid vertical={false} stroke="var(--grid)" />
               <XAxis dataKey="label" tick={axisTick} tickLine={false} axisLine={{ stroke: "var(--axis)" }}
                 minTickGap={12} />
@@ -142,6 +150,12 @@ export function RunCharts({ runs }: { runs: Run[] }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+        {initial.length > 0 && (
+          <div className="small muted">
+            Not shown: initial load{initial.length > 1 ? "s" : ""}{" "}
+            {initial.map((r) => `#${r.id} (${compact(r.rows_new)} new lots)`).join(", ")}.
+          </div>
+        )}
       </div>
       <div className="card">
         <h2>Ingest duration</h2>

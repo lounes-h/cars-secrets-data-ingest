@@ -29,6 +29,15 @@ stream, is on a router that requires the session. New routes must be added to th
 - nginx sends a strict Content-Security-Policy (`default-src 'self'`), `X-Frame-Options: DENY`,
   `nosniff` and `Referrer-Policy: same-origin`.
 
+## Outbound requests (lot photos)
+
+The API makes one kind of outbound request: listing a lot's photos. It uses only the image URL
+stored for that lot, never a URL from the client. The provider code contacts only its
+allow-listed API host (Copart: `inventoryv2.copart.io`, always over HTTPS) and returns only
+image URLs on its image host (`cs.copart.com`). The response is capped at 2 MB with an 8 s
+timeout. The CSP `img-src` allows that image host and nothing else, and images load with
+`referrerPolicy="no-referrer"`.
+
 ## Network
 
 Compose publishes only the dashboard (8080) and Postgres (5433), both on `127.0.0.1`. The API

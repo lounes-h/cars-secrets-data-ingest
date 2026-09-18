@@ -1,7 +1,14 @@
 import pytest
 
 from ingest.converters import to_text
-from ingest.providers import COPART, PROVIDERS, FieldMapping, Provider, get_provider
+from ingest.providers import (
+    COPART,
+    PROVIDERS,
+    FieldMapping,
+    Provider,
+    copart,
+    get_provider,
+)
 from ingest.schema import COLUMN_NAMES
 
 
@@ -41,3 +48,64 @@ def test_lots_table_has_every_canonical_column(conn):
         "SELECT column_name FROM information_schema.columns WHERE table_name = 'lots'"
     )}
     assert set(COLUMN_NAMES) <= cols
+
+
+THUMB = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/lpp/0726/abc_thb.jpg"
+LOT = {"lot_number": "41633106", "thumbnail_url": THUMB,
+       "image_url": "http://inventoryv2.copart.io/v1/lotImages/41633106?country=us&yardNumber=1"}
+
+
+def link(url, thumb=False, hd=False, sound=False):
+    return {"url": url, "isThumbNail": thumb, "isHdImage": hd, "isEngineSound": sound}
+
+
+def test_copart_images_lists_every_photo_in_sequence_order():
+    calls = []
+
+    def get_json(url):
+        calls.append(url)
+        return {"imgCount": 2, "lotImages": [
+            {"sequence": 2, "link": [link("https://cs.copart.com/b_ful.jpg "),
+                                     link("https://cs.copart.com/b_thb.jpg", thumb=True)]},
+            {"sequence": 1, "link": [link("https://cs.copart.com/a_ful.jpg"),
+                                     link("https://cs.copart.com/a_hrs.jpg", hd=True),
+                                     link("https://cs.copart.com/a_thb.jpg", thumb=True)]},
+        ]}
+
+    images = copart.images(LOT, get_json)
+    # always HTTPS, even though the export stores an http:// link
+    assert calls == ["https://inventoryv2.copart.io/v1/lotImages/41633106?country=us&yardNumber=1"]
+    assert [i.full for i in images] == ["https://cs.copart.com/a_ful.jpg",
+                                        "https://cs.copart.com/b_ful.jpg"]
+    assert images[0].hd == "https://cs.copart.com/a_hrs.jpg"
+    assert images[1].thumb == "https://cs.copart.com/b_thb.jpg" and images[1].hd is None
+
+
+def test_copart_images_drops_foreign_hosts_and_engine_sounds():
+    def get_json(url):
+        return {"lotImages": [
+            {"sequence": 1, "link": [link("https://evil.example/x.jpg")]},
+            {"sequence": 2, "link": [link("https://cs.copart.com/s.mp3", sound=True)]},
+            {"sequence": 3, "link": [link("https://cs.copart.com/ok_ful.jpg")]},
+        ]}
+
+    assert [i.full for i in copart.images(LOT, get_json)] == ["https://cs.copart.com/ok_ful.jpg"]
+
+
+def test_copart_images_falls_back_to_export_thumbnail():
+    def failing(url):
+        raise OSError("timeout")
+
+    (image,) = copart.images(LOT, failing)
+    assert image.thumb == THUMB
+    assert image.full == THUMB.replace("_thb.", "_ful.")
+
+
+def test_copart_images_never_calls_an_unexpected_host():
+    def get_json(url):
+        raise AssertionError("must not be called")
+
+    lot = {**LOT, "image_url": "http://169.254.169.254/v1/lotImages/1"}
+    assert [i.thumb for i in copart.images(lot, get_json)] == [THUMB]
+    assert copart.images({"lot_number": "1"}, get_json) == []
+    assert copart.images({"thumbnail_url": "https://elsewhere.com/a_thb.jpg"}, get_json) == []

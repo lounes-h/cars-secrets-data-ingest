@@ -3,8 +3,10 @@
 import asyncio
 import contextlib
 import shutil
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -28,7 +30,27 @@ log = structlog.get_logger()
 LOT_COLUMNS = """source, lot_number, year, make, model_group, model_detail, trim, vin,
     damage_primary, damage_secondary, odometer, est_retail_value, repair_cost, high_bid,
     buy_it_now_price, currency, sale_status, sale_at, yard_code, yard_name, location_city,
-    location_state, first_seen_at, last_seen_at, last_changed_at, removed_at"""
+    location_state, thumbnail_url, first_seen_at, last_seen_at, last_changed_at, removed_at"""
+
+
+class TTLCache:
+    """Small in-process cache (photo lists change rarely; Copart is not called per page view)."""
+
+    def __init__(self, ttl_seconds: float, max_items: int = 500, clock=time.monotonic):
+        self.ttl, self.max_items, self.clock = ttl_seconds, max_items, clock
+        self._items: dict[Any, tuple[float, Any]] = {}
+
+    def get(self, key: Any) -> Any | None:
+        hit = self._items.get(key)
+        if hit is None or hit[0] < self.clock():
+            self._items.pop(key, None)
+            return None
+        return hit[1]
+
+    def put(self, key: Any, value: Any) -> None:
+        if len(self._items) >= self.max_items:
+            self._items.pop(next(iter(self._items)))  # oldest insertion
+        self._items[key] = (self.clock() + self.ttl, value)
 
 
 class EventBroker:
@@ -80,6 +102,7 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     )
     broker = EventBroker()
     limiter = auth.LoginRateLimiter()
+    image_cache = TTLCache(ttl_seconds=15 * 60)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -361,6 +384,26 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
             })
             newer = v["attributes"]
         return {"lot": lot, "history": history}
+
+    @api.get("/lots/{source}/{lot_number}/images")
+    def lot_images(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
+        """Photos of a lot. The provider is asked with the URLs stored for the lot -- never
+        with anything the client sends -- and only known image hosts are returned."""
+        lot = conn.execute(
+            """SELECT lot_number, image_url, thumbnail_url FROM lots
+               WHERE source = %s AND lot_number = %s""", (source, lot_number),
+        ).fetchone()
+        if lot is None:
+            raise HTTPException(404, "lot not found")
+        provider = PROVIDERS.get(source)
+        if provider is None or provider.fetch_images is None:
+            return {"images": []}
+        key = (source, lot_number, lot["image_url"], lot["thumbnail_url"])
+        images = image_cache.get(key)
+        if images is None:
+            images = [asdict(i) for i in provider.fetch_images(lot)]
+            image_cache.put(key, images)
+        return {"images": images}
 
     # --- live events -----------------------------------------------------------------------------
     @api.get("/events")

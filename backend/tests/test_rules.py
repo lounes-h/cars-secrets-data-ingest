@@ -49,8 +49,10 @@ def test_row_count_anomaly_both_directions_and_no_baseline():
 
 
 def test_removal_skipped_and_slow():
-    alerts = evaluate_run(facts(removal_skipped=["1", "2"], duration_seconds=301), SETTINGS)
-    assert types(alerts) == {("removal_skipped", "warning"), ("slow_ingest", "warning")}
+    alerts = evaluate_run(facts(removal_skipped=["1", "2"], removal_scope_label="yard",
+                                duration_seconds=301), SETTINGS)
+    assert types(alerts) == {("removal_skipped", "info"), ("slow_ingest", "warning")}
+    assert alerts[0].title.startswith("2 yard(s) in f.csv")
 
 
 def test_fingerprints_are_per_file():

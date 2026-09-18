@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -8,6 +8,15 @@ from ..schema import COLUMN_INDEX
 
 # Looks up the raw value of the first alias present in the file, or None.
 RawGetter = Callable[[tuple[str, ...]], str | None]
+
+
+@dataclass(frozen=True)
+class LotImage:
+    """One photo of a lot in the sizes the provider offers (HTTPS URLs)."""
+
+    thumb: str | None
+    full: str | None
+    hd: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,11 @@ class Provider:
     # A lot missing from an export is marked removed only if the export covers its scope
     # (e.g. its yard). None: every export is a full snapshot of the provider's inventory.
     removal_scope: str | None = None
+    # How a removal scope is called in alerts ("yard").
+    removal_scope_label: str = "scope"
+    # Lists a lot's photos from its stored columns (`image_url`, `thumbnail_url`, …). Called by
+    # the API on demand; may do network I/O and must never raise.
+    fetch_images: Callable[[Mapping[str, Any]], list[LotImage]] | None = None
 
     def __post_init__(self) -> None:
         if self.removal_scope is not None and self.removal_scope not in COLUMN_INDEX:

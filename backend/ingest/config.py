@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Lots missing from a file are only marked removed in a scope (yard) where the file holds at
     # least this share of the lots currently active there; guards against truncated exports.
     removal_min_ratio: float = 0.5
+    # A lot is only marked removed once its sale time plus this grace period has passed: the
+    # auction opens at the sale time, but bidding on the lot itself ends some time later.
+    removal_grace_minutes: int = 120
     baseline_runs: int = 24
     monitor_interval_seconds: float = 30.0
 

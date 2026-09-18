@@ -41,7 +41,9 @@ stopped changing.
    - **updated** lots have their previous version saved to `lot_versions`,
    - **unchanged** lots only get `last_seen_at` refreshed,
    - **removed**: lots missing from the file are marked removed, but only in yards the file
-     actually covers.
+     actually covers, and only once the lot's sale time plus 2 hours has passed (the auction
+     opens at the sale time but bidding on the lot ends later). Until then the lot stays
+     active; the run shows it as "removal deferred".
 4. **Archived.** The file is gzipped into `data/archive/` (kept 7 days). If the load fails,
    the file goes to `data/failed/` instead, raises a critical alert, and can be retried from
    the dashboard.
@@ -54,7 +56,7 @@ stopped changing.
 | Runs | Every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
 | Alerts | Open/resolved alerts with severity filter; acknowledge and resolve |
 | Schema | Every column a provider has sent, what it maps to, and when it appeared or disappeared |
-| Lots | Search by lot number, VIN, make or model; field-by-field change history per lot |
+| Lots | Search by lot number, VIN, make or model, with thumbnails; per lot: photo gallery (full size + HD) and field-by-field change history |
 
 New warning and critical alerts pop up on whatever page is open (Server-Sent Events).
 
@@ -69,7 +71,7 @@ New warning and critical alerts pop up on whatever page is open (Server-Sent Eve
 | `field_conversion_errors` | warning | ≥ 1 % of a typed column couldn't be parsed (format change?) |
 | `schema_column_added` / `schema_column_removed` | warning | The export's header changed |
 | `row_count_anomaly` | warning | Row count differs from the recent average by ≥ 30 % |
-| `removal_skipped` | warning | A yard in the file holds under half its active lots (looks truncated) |
+| `removal_skipped` | info | A yard in the file holds under half its active lots, so its missing lots were kept (routine with partial downloads) |
 | `slow_ingest` | warning | A load took more than 5 min |
 | `unroutable_file` | warning | A CSV was saved outside `inbox/<provider>/` |
 | `archive_failed` | warning | The file was loaded but could not be archived |

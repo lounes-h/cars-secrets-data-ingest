@@ -37,6 +37,7 @@ class LoadResult:
     rows_unchanged: int = 0
     rows_rejected: int = 0
     rows_removed: int = 0
+    rows_removal_deferred: int = 0
     removal_skipped: list[str] = field(default_factory=list)
     baseline_rows: float | None = None
     field_errors: dict[str, int] = field(default_factory=dict)
@@ -151,8 +152,9 @@ def load_file(
         {"source": source, "file_id": file_id, **params},
     )
 
-    result.rows_removed, result.removal_skipped = _mark_removed(
-        conn, source, csv_file.provider.removal_scope, settings.removal_min_ratio
+    result.rows_removed, result.rows_removal_deferred, result.removal_skipped = _mark_removed(
+        conn, source, csv_file.provider.removal_scope, settings.removal_min_ratio,
+        settings.removal_grace_minutes,
     )
 
     _update_registry(conn, file_id, csv_file, registry, result)
@@ -162,13 +164,18 @@ def load_file(
 
 
 def _mark_removed(
-    conn: Connection, source: str, scope_column: str | None, min_ratio: float
-) -> tuple[int, list[str]]:
+    conn: Connection, source: str, scope_column: str | None, min_ratio: float,
+    grace_minutes: int,
+) -> tuple[int, int, list[str]]:
     """Mark lots absent from the export as removed, scope by scope (e.g. per yard).
 
     A scope counts as covered only if the export contains it and holds at least `min_ratio`
-    of the lots active there; otherwise it looks truncated and is skipped. Returns the number
-    of lots removed and the skipped scopes. Must run after the upsert.
+    of the lots active there; otherwise it looks truncated and is skipped. Within a covered
+    scope, a missing lot whose sale is not over yet (sale time + grace) stays active; a later
+    export that still lacks it removes it then. Lots without a sale time have no auction
+    pending and are removed right away.
+
+    Returns (lots removed, lots deferred, skipped scopes). Must run after the upsert.
     """
     # No scope column: the whole provider is a single scope.
     scope = scope_column or "''::text"
@@ -188,15 +195,26 @@ def _mark_removed(
     covered = [r["scope"] for r in rows if r["covered"]]
     skipped = sorted(r["scope"] or "(all)" for r in rows if not r["covered"])
     if not covered:
-        return 0, skipped
-    cur = conn.execute(
-        f"""UPDATE lots l SET removed_at = now()
-            WHERE l.source = %(source)s AND l.removed_at IS NULL
-              AND {lot_scope} = ANY(%(covered)s)
-              AND NOT EXISTS (SELECT 1 FROM stage s WHERE s.lot_number = l.lot_number)""",
-        {"source": source, "covered": covered},
-    )
-    return cur.rowcount, skipped
+        return 0, 0, skipped
+    counts = conn.execute(
+        f"""WITH missing AS (
+                SELECT l.source, l.lot_number,
+                       l.sale_at IS NOT NULL
+                       AND l.sale_at + make_interval(mins => %(grace)s) > now() AS pending
+                FROM lots l
+                WHERE l.source = %(source)s AND l.removed_at IS NULL
+                  AND {lot_scope} = ANY(%(covered)s)
+                  AND NOT EXISTS (SELECT 1 FROM stage s WHERE s.lot_number = l.lot_number)),
+            removed AS (
+                UPDATE lots l SET removed_at = now()
+                FROM missing m
+                WHERE NOT m.pending AND l.source = m.source AND l.lot_number = m.lot_number
+                RETURNING 1)
+            SELECT (SELECT count(*) FROM removed)                     AS removed,
+                   (SELECT count(*) FROM missing WHERE pending)       AS deferred""",
+        {"source": source, "covered": covered, "grace": grace_minutes},
+    ).fetchone()
+    return counts["removed"], counts["deferred"], skipped
 
 
 def _hash_changed(old: str, new: str) -> str:

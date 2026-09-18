@@ -71,21 +71,34 @@ only, the loader compares just the columns present in both files.
 
 ### Removals
 
-A lot absent from an export is marked removed only if all of these hold:
+A lot absent from an export is marked removed only if all of these hold (`loader._mark_removed`):
 
 - its **yard** appears in the export (`Provider.removal_scope`), because Copart downloads can
   cover a subset of yards;
 - the export holds at least `REMOVAL_MIN_RATIO` (50 %) of that yard's active lots, which
-  protects against truncated files.
+  protects against truncated files;
+- its auction is over: `sale_at + REMOVAL_GRACE_MINUTES` (120) is in the past. A lot leaves
+  the list when its sale opens, but bidding on it ends later. Lots still pending are counted
+  in `ingest_files.rows_removal_deferred` and removed by the first later export that still
+  lacks them. Lots with no sale time have nothing pending and are removed right away.
 
 A removed lot that reappears is active again.
+
+## Lot photos
+
+Exports only carry a thumbnail and a link to the provider's image API. `Provider.fetch_images`
+turns the stored lot into a list of photos (thumbnail / full / HD). For Copart it calls
+`https://inventoryv2.copart.io/v1/lotImages/<lot>` and, if that fails, derives the full-size
+photo from the thumbnail (`_thb` → `_ful`). The API endpoint
+`GET /api/lots/{source}/{lot_number}/images` caches the result for 15 minutes. Browsers load
+the photos straight from `cs.copart.com`.
 
 ## Adding a provider
 
 1. Create `backend/ingest/providers/<name>.py` defining a `Provider`: key aliases and key
    parser, `FieldMapping`s onto canonical columns, `ignored_columns`, `volatile_columns`, an
-   optional `derive` for columns built from several source values, and `removal_scope`
-   (`None` if every export is a full snapshot).
+   optional `derive` for columns built from several source values, `removal_scope`
+   (`None` if every export is a full snapshot) and optionally `fetch_images`.
 2. Register it in `providers/__init__.py`.
 3. Add it to `ENABLED_PROVIDERS` so the staleness check covers it.
 4. Save its files into `data/inbox/<name>/`. The worker creates the folder on start.

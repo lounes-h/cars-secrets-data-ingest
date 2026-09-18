@@ -59,9 +59,17 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   ignored, `Create Date/Time` is volatile, `8119.0` == `8119`). If the column set changed
   since the last file, only columns present in both files are compared, so drift never marks
   every lot as updated. Only real changes write `lot_versions` (full history).
-- **Removals are scoped**: Copart downloads can be a subset of yards, so a lot missing from
-  a file is marked removed only if its yard (`Provider.removal_scope`) is in the file **and**
-  the file holds ≥ 50 % of that yard's active lots; otherwise the yard is skipped + alert.
+- **Removals are scoped and wait for the auction**: Copart downloads can be a subset of
+  yards, so a lot missing from a file is marked removed only if its yard
+  (`Provider.removal_scope`) is in the file **and** the file holds ≥ 50 % of that yard's
+  active lots (otherwise the yard is skipped + info alert), **and** its `sale_at` +
+  `REMOVAL_GRACE_MINUTES` (120) has passed — bidding ends after the sale opens. Deferred lots
+  stay active and are removed by the first later file that still lacks them. Lots without a
+  sale time have no pending auction and are removed immediately.
+- **Lot photos**: `Provider.fetch_images` lists photos on demand (API
+  `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
+  only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
+  `cs.copart.com` for images, which the CSP `img-src` allows). Browsers load images directly.
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API
@@ -162,11 +170,12 @@ A code change is not considered complete until the relevant unit tests have been
 ## Current state
 
 - Working end to end: watcher → ingest → Postgres, change history, schema-drift handling,
-  yard-scoped removals, alerts (dashboard only, no email/Slack by decision), dashboard with
-  login, live updates, run retry, lot explorer. One provider: Copart.
+  yard-scoped removals deferred until the auction is over, alerts (dashboard only, no
+  email/Slack by decision), dashboard with login, live updates, run retry, lot explorer with
+  photos. One provider: Copart.
 - Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
 - Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
-  rows / 44 yards. That is why removals are scoped per yard and the row-count alert may fire
+  rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
   when download size changes; tune `ROW_COUNT_DEVIATION_RATIO` if it is noisy.
 - Single worker by design (per-provider advisory lock makes a second one safe but idle).
 - Not done yet: downloader, external alert channels, a second provider.

@@ -41,6 +41,7 @@ class RunFacts:
     duration_seconds: float
     baseline_rows: float | None
     removal_skipped: list[str]  # removal scopes (yards) that looked truncated
+    removal_scope_label: str = "scope"
 
 
 def evaluate_run(facts: RunFacts, settings: Settings) -> list[AlertSpec]:
@@ -80,11 +81,13 @@ def evaluate_run(facts: RunFacts, settings: Settings) -> list[AlertSpec]:
             ))
 
     if facts.removal_skipped:
+        # Info, not warning: partial downloads make this routine; a truly truncated file is
+        # caught by the row-count rule.
         n = len(facts.removal_skipped)
         alerts.append(AlertSpec(
-            "warning", "removal_skipped",
-            f"{n} scope(s) in {name} hold under half their active lots; "
-            "missing lots there were NOT marked removed",
+            "info", "removal_skipped",
+            f"{n} {facts.removal_scope_label}(s) in {name} hold under half their active lots; "
+            "missing lots there were not marked removed",
             f"removal_skipped:{src}:{facts.file_id}",
             {"scopes": facts.removal_skipped[:50], "scopes_total": n},
         ))

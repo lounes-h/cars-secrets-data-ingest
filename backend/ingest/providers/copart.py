@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import json
+import urllib.request
+from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+import structlog
 
 from ..converters import (
     ConversionError,
     local_timestamp,
     to_db2_timestamp,
     to_decimal,
+    to_https_url,
     to_int,
     to_iso_utc,
     to_text,
     to_yyyymmdd,
 )
-from .base import FieldMapping, Provider, RawGetter
+from .base import FieldMapping, LotImage, Provider, RawGetter
+
+log = structlog.get_logger()
 
 
 def _lot_number(raw: str) -> str | None:
@@ -35,6 +44,61 @@ _TIME_ZONE = ("time_zone",)
 
 def _derive(raw: RawGetter, values: dict[str, Any]) -> None:
     values["sale_at"] = local_timestamp(values.get("sale_date"), raw(_SALE_TIME), raw(_TIME_ZONE))
+
+
+# The lot's `image_url` points at Copart's image API, which lists every photo of the lot.
+# Only these hosts are ever contacted or embedded, whatever the export contains.
+IMAGE_API_HOST = "inventoryv2.copart.io"
+IMAGE_HOST = "cs.copart.com"
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+def _get_json(url: str) -> Any:
+    request = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   "User-Agent": "cars-ingest/1.0"})
+    with urllib.request.urlopen(request, timeout=8) as response:  # noqa: S310 - https, fixed host
+        return json.loads(response.read(_MAX_RESPONSE_BYTES))
+
+
+def _image_url(raw: Any) -> str | None:
+    """HTTPS URL on Copart's image host, or None."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        url = to_https_url(raw)
+    except ConversionError:
+        return None
+    return url if url and urlsplit(url).hostname == IMAGE_HOST else None
+
+
+def images(lot: Mapping[str, Any], get_json: Callable[[str], Any] = _get_json) -> list[LotImage]:
+    """All photos from Copart's image API; falls back to the export's thumbnail
+    (full size = same name with `_ful` instead of `_thb`) if the API is unreachable."""
+    found: list[LotImage] = []
+    api = urlsplit((lot.get("image_url") or "").strip())
+    if api.hostname == IMAGE_API_HOST and api.path.startswith("/v1/lotImages/"):
+        try:
+            data = get_json(urlunsplit(("https", api.netloc, api.path, api.query, "")))
+            entries = sorted(data.get("lotImages") or [], key=lambda e: e.get("sequence") or 0)
+            for entry in entries:
+                sizes: dict[str, str | None] = {"thumb": None, "full": None, "hd": None}
+                for link in entry.get("link") or []:
+                    url = _image_url(link.get("url"))
+                    if url is None or link.get("isEngineSound"):
+                        continue
+                    kind = ("thumb" if link.get("isThumbNail")
+                            else "hd" if link.get("isHdImage") else "full")
+                    sizes[kind] = sizes[kind] or url
+                if sizes["thumb"] or sizes["full"] or sizes["hd"]:
+                    found.append(LotImage(**sizes))
+        except Exception:  # noqa: BLE001 - photos are best effort, never an API error
+            log.warning("images.fetch_failed", lot=lot.get("lot_number"), exc_info=True)
+    if not found:
+        thumb = _image_url(lot.get("thumbnail_url"))
+        if thumb:
+            full = thumb.replace("_thb.", "_ful.") if "_thb." in thumb else None
+            found.append(LotImage(thumb=thumb, full=full))
+    return found
 
 
 COPART = Provider(
@@ -83,6 +147,7 @@ COPART = Provider(
         _f("location_country", to_text),
         _f("seller_name", to_text),
         _f("image_url", to_text),
+        _f("thumbnail_url", to_https_url, "image_thumbnail"),
         _f("source_created_at", to_db2_timestamp, "create_date_time"),
         _f("source_updated_at", to_iso_utc, "last_updated_time"),
     ),
@@ -91,4 +156,6 @@ COPART = Provider(
     # Downloads can be a subset of yards (seen: 44 of 224), so absence only means removal
     # for lots of a yard the export contains.
     removal_scope="yard_code",
+    removal_scope_label="yard",
+    fetch_images=images,
 )

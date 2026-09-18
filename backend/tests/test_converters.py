@@ -11,6 +11,7 @@ from ingest.converters import (
     normalize_headers,
     to_db2_timestamp,
     to_decimal,
+    to_https_url,
     to_int,
     to_iso_utc,
     to_text,
@@ -104,3 +105,20 @@ def test_local_timestamp_unknown_parts_give_none(day, hhmm, tz):
 ])
 def test_canonical_value(raw, expected):
     assert canonical_value(raw) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("cs.copart.com/v1/a_thb.jpg", "https://cs.copart.com/v1/a_thb.jpg"),
+    ("http://cs.copart.com/a.jpg", "https://cs.copart.com/a.jpg"),
+    ("HTTPS://cs.copart.com/a.jpg ", "https://cs.copart.com/a.jpg"),
+    ("//cs.copart.com/a.jpg", "https://cs.copart.com/a.jpg"),
+    ("", None),
+])
+def test_to_https_url(raw, expected):
+    assert to_https_url(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["not a url", "nohost/path", "https://"])
+def test_to_https_url_rejects(raw):
+    with pytest.raises(ConversionError):
+        to_https_url(raw)

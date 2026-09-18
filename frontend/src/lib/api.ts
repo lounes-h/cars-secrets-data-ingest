@@ -21,6 +21,7 @@ export interface Run {
   rows_unchanged: number | null;
   rows_rejected: number | null;
   rows_removed: number | null;
+  rows_removal_deferred: number | null;
   removal_skipped: string[];
   error: string | null;
 }
@@ -116,6 +117,7 @@ export interface Lot {
   yard_name: string | null;
   location_city: string | null;
   location_state: string | null;
+  thumbnail_url: string | null;
   first_seen_at: string;
   last_seen_at: string;
   last_changed_at: string;
@@ -129,6 +131,12 @@ export interface LotDetail {
     file_id: number | null;
     changes: { field: string; old: string | null; new: string | null }[];
   }[];
+}
+
+export interface LotImage {
+  thumb: string | null;
+  full: string | null;
+  hd: string | null;
 }
 
 export class ApiError extends Error {
@@ -187,6 +195,9 @@ export const api = {
   lots: (params?: Params) => request<{ items: Lot[] }>("GET", withParams("/api/lots", params)),
   lot: (source: string, lotNumber: string) =>
     request<LotDetail>("GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}`),
+  lotImages: (source: string, lotNumber: string) =>
+    request<{ images: LotImage[] }>(
+      "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/images`),
 };
 
 export { withParams };

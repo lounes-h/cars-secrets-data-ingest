@@ -122,6 +122,14 @@ export function RunDetailPage() {
             <dt>Updated lots</dt><dd>{int(run.rows_updated)}</dd>
             <dt>Unchanged lots</dt><dd>{int(run.rows_unchanged)}</dd>
             <dt>Marked removed</dt><dd>{int(run.rows_removed)}</dd>
+            {!!run.rows_removal_deferred && (
+              <>
+                <dt>Removal deferred</dt>
+                <dd title="Missing from this file, but the auction (sale time + grace period) isn't over yet">
+                  {int(run.rows_removal_deferred)} lots (auction not over yet)
+                </dd>
+              </>
+            )}
             <dt>Rejected rows</dt><dd>{int(run.rows_rejected)}</dd>
             {run.removal_skipped.length > 0 && (
               <>

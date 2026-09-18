@@ -53,6 +53,22 @@ def to_text(value: str) -> str | None:
     return value or None
 
 
+def to_https_url(value: str) -> str | None:
+    """'cs.copart.com/a.jpg' or 'http://…' -> 'https://…' (images are embedded over HTTPS)."""
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("//"):
+        value = value[2:]
+    elif value.lower().startswith("http://"):
+        value = value[7:]
+    elif value.lower().startswith("https://"):
+        value = value[8:]
+    if not value or " " in value or "." not in value.split("/", 1)[0]:
+        raise ConversionError(f"not a URL: {value!r}")
+    return "https://" + value
+
+
 def to_int(value: str) -> int | None:
     value = value.strip()
     if not value:

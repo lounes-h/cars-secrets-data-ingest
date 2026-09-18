@@ -29,6 +29,16 @@ def col(header, name):
     return header.index(name)
 
 
+def auctions_over(rows):
+    """The fixture's real sale dates are upcoming, and upcoming lots are never removed; tests
+    about removal use lots whose auction is long finished."""
+    header, _ = read_sample()
+    rows = [list(r) for r in rows]
+    for r in rows:
+        r[col(header, "Sale Date M/D/CY")] = "20200101"
+    return rows
+
+
 def rebytes(rows):
     """Same lots, different file bytes (the export's row counter differs), so the file is not
     skipped as a duplicate."""
@@ -54,6 +64,9 @@ def test_first_ingest_loads_lots_and_rejects_bad_rows(conn, settings):
     lot = conn.execute(
         "SELECT make, year, vin, sale_at FROM lots WHERE lot_number = '41633106'").fetchone()
     assert (lot["make"], lot["year"], lot["vin"]) == ("ACURA", 2013, "JH4CU2F65DC010051")
+    thumb = conn.execute("SELECT thumbnail_url FROM lots WHERE lot_number = '41633106'"
+                         ).fetchone()["thumbnail_url"]
+    assert thumb.startswith("https://cs.copart.com/") and thumb.endswith("_thb.jpg")
     # archived, gzipped, out of the inbox
     assert not path.exists()
     assert r["archived_path"].endswith("_sample.csv.gz")
@@ -99,6 +112,7 @@ def test_changed_lots_are_versioned(conn, settings, make_export):
 
 def test_missing_lots_are_removed_only_in_yards_the_export_covers(conn, settings, make_export):
     header, rows = read_sample()
+    rows = auctions_over(rows)
     yard = col(header, "Yard number")
     ingest(conn, make_export(rows), settings)
     yard1 = [r for r in rows if r[yard] == "1"]  # 194 lots
@@ -114,6 +128,7 @@ def test_missing_lots_are_removed_only_in_yards_the_export_covers(conn, settings
 
 def test_removed_lot_that_comes_back_is_active_again(conn, settings, make_export):
     header, rows = read_sample()
+    rows = auctions_over(rows)
     ingest(conn, make_export(rows), settings)
     ingest(conn, make_export(rows[1:]), settings)
     lot = rows[0][col(header, "Lot number")]
@@ -124,8 +139,47 @@ def test_removed_lot_that_comes_back_is_active_again(conn, settings, make_export
                         (lot,)).fetchone()["removed_at"] is None
 
 
+def test_lot_is_not_removed_before_its_auction_is_over(conn, settings, make_export):
+    header, rows = read_sample()
+    yard, sale_date = col(header, "Yard number"), col(header, "Sale Date M/D/CY")
+    lot_col = col(header, "Lot number")
+    yard1 = [list(r) for r in rows if r[yard] == "1"]
+    upcoming, sold, unscheduled = yard1[0], yard1[1], yard1[2]
+    upcoming[sale_date] = "20990101"  # auction still ahead
+    sold[sale_date] = "20200101"  # long over
+    unscheduled[sale_date] = "0"  # no sale date: nothing pending
+    ingest(conn, make_export(yard1), settings)
+
+    outcome = ingest(conn, make_export(yard1[3:]), settings)
+
+    r = run(conn, outcome.file_id)
+    assert (r["rows_removed"], r["rows_removal_deferred"]) == (2, 1)
+    state = {x["lot_number"]: x["removed_at"] is not None for x in conn.execute(
+        "SELECT lot_number, removed_at FROM lots")}
+    assert state[upcoming[lot_col]] is False
+    assert state[sold[lot_col]] is True and state[unscheduled[lot_col]] is True
+
+
+def test_grace_period_extends_past_the_sale_time(conn, settings, make_export):
+    header, rows = read_sample()
+    yard = col(header, "Yard number")
+    yard1 = [list(r) for r in rows if r[yard] == "1"]
+    ingest(conn, make_export(yard1), settings)
+    # the auction opened an hour ago: inside the 2 h grace period, so kept
+    conn.execute("""UPDATE lots SET sale_at = now() - interval '1 hour'
+                    WHERE lot_number = %s""", (yard1[0][col(header, "Lot number")],))
+    outcome = ingest(conn, make_export(yard1[1:]), settings)
+    assert run(conn, outcome.file_id)["rows_removal_deferred"] == 1
+
+    settings.removal_grace_minutes = 30
+    outcome = ingest(conn, make_export(rebytes(yard1[1:])), settings)
+    r = run(conn, outcome.file_id)
+    assert (r["rows_removed"], r["rows_removal_deferred"]) == (1, 0)
+
+
 def test_truncated_yard_is_not_wiped(conn, settings, make_export):
     header, rows = read_sample()
+    rows = auctions_over(rows)
     yard = col(header, "Yard number")
     ingest(conn, make_export(rows), settings)
     yard1 = [r for r in rows if r[yard] == "1"]

@@ -1,9 +1,11 @@
+import dataclasses
+
 import pytest
 from fastapi.testclient import TestClient
 
-from ingest.api.app import create_app, diff_attributes
+from ingest.api.app import TTLCache, create_app, diff_attributes
 from ingest.pipeline import process_file
-from ingest.providers import COPART
+from ingest.providers import COPART, PROVIDERS, LotImage
 
 from .conftest import read_sample
 
@@ -135,3 +137,42 @@ def test_diff_attributes():
     assert diff_attributes({"a": "1", "b": "2"}, {"a": "1", "b": "3", "c": "4"}) == [
         {"field": "b", "old": "2", "new": "3"}, {"field": "c", "old": None, "new": "4"},
     ]
+
+
+def test_lot_images_are_fetched_once_and_cached(authed, conn, settings, make_export, monkeypatch):
+    header, rows = read_sample()
+    process_file(conn, make_export(rows), COPART, settings)
+    seen = []
+
+    def fake_fetch(lot):
+        seen.append(dict(lot))
+        return [LotImage(thumb="https://cs.copart.com/a_thb.jpg",
+                         full="https://cs.copart.com/a_ful.jpg")]
+
+    monkeypatch.setitem(PROVIDERS, "copart", dataclasses.replace(COPART, fetch_images=fake_fetch))
+    lot_number = rows[0][header.index("Lot number")]
+    for _ in range(2):
+        body = authed.get(f"/api/lots/copart/{lot_number}/images").json()
+        assert body == {"images": [{"thumb": "https://cs.copart.com/a_thb.jpg",
+                                    "full": "https://cs.copart.com/a_ful.jpg", "hd": None}]}
+    assert len(seen) == 1
+    # the provider only ever gets the URLs stored for the lot
+    assert seen[0]["image_url"].startswith("http://inventoryv2.copart.io/v1/lotImages/")
+    assert authed.get("/api/lots/copart/0/images").status_code == 404
+
+
+def test_lot_images_require_login(client):
+    assert client.get("/api/lots/copart/1/images").status_code == 401
+
+
+def test_ttl_cache_expires_and_is_bounded():
+    now = [0.0]
+    cache = TTLCache(ttl_seconds=10, max_items=2, clock=lambda: now[0])
+    cache.put("a", 1)
+    assert cache.get("a") == 1
+    now[0] = 11
+    assert cache.get("a") is None
+    cache.put("b", 2)
+    cache.put("c", 3)
+    cache.put("d", 4)
+    assert cache.get("b") is None and cache.get("d") == 4

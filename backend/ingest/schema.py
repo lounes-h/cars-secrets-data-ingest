@@ -45,6 +45,7 @@ CANONICAL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("location_country", "text"),
     ("seller_name", "text"),
     ("image_url", "text"),
+    ("thumbnail_url", "text"),
     ("source_created_at", "timestamp"),
     ("source_updated_at", "timestamptz"),
 )

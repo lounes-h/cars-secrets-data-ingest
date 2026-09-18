@@ -71,11 +71,12 @@ def process_file(conn: Connection, path: Path, provider: Provider, settings: Set
             conn.execute(
                 """UPDATE ingest_files SET status = 'succeeded', finished_at = clock_timestamp(),
                           rows_total = %s, rows_new = %s, rows_updated = %s, rows_unchanged = %s,
-                          rows_rejected = %s, rows_removed = %s, removal_skipped = %s,
-                          columns = %s, field_errors = %s
+                          rows_rejected = %s, rows_removed = %s, rows_removal_deferred = %s,
+                          removal_skipped = %s, columns = %s, field_errors = %s
                    WHERE id = %s""",
                 (result.rows_total, result.rows_new, result.rows_updated, result.rows_unchanged,
-                 result.rows_rejected, result.rows_removed, Jsonb(result.removal_skipped),
+                 result.rows_rejected, result.rows_removed, result.rows_removal_deferred,
+                 Jsonb(result.removal_skipped),
                  Jsonb(csv_file.source_header), Jsonb(result.field_errors), file_id),
             )
             facts = RunFacts(
@@ -83,6 +84,7 @@ def process_file(conn: Connection, path: Path, provider: Provider, settings: Set
                 rows_total=result.rows_total, rows_rejected=result.rows_rejected,
                 field_errors=result.field_errors, duration_seconds=time.monotonic() - started,
                 baseline_rows=result.baseline_rows, removal_skipped=result.removal_skipped,
+                removal_scope_label=provider.removal_scope_label,
             )
             specs = evaluate_run(facts, settings) + evaluate_schema(
                 source, first_file=result.first_file, added=result.columns_added,
@@ -103,6 +105,7 @@ def process_file(conn: Connection, path: Path, provider: Provider, settings: Set
 
     log.info("ingest.succeeded", file_id=file_id, rows=result.rows_total, new=result.rows_new,
              updated=result.rows_updated, removed=result.rows_removed,
+             removal_deferred=result.rows_removal_deferred,
              rejected=result.rows_rejected, seconds=round(time.monotonic() - started, 1))
     _archive(conn, path, file_id, source, settings)
     return Outcome(file_id, "succeeded")
