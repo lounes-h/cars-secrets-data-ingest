@@ -25,10 +25,11 @@ docker compose logs -f worker api            # watch it happen
 docker compose down                          # stop (add -v to delete the database too)
 ```
 
-The downloader just has to save each export into `data/inbox/copart/`. Writing to a
-temporary name and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files
-are ignored. A file written in place also works, because the worker waits until the file has
-stopped changing.
+Exports reach the inbox through the **Copart downloader**, which clicks "Download CSV file"
+hourly in Chrome using your logged-in session. Set it up with
+`./scripts/install_downloader.sh` and see [docs/downloader.md](docs/downloader.md). Any
+other tool works as well if it saves into `data/inbox/copart/`. Writing to a temporary name
+and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are ignored.
 
 ## What happens to a file
 
@@ -76,6 +77,8 @@ New warning and critical alerts pop up on whatever page is open (Server-Sent Eve
 | `unroutable_file` | warning | A CSV was saved outside `inbox/<provider>/` |
 | `archive_failed` | warning | The file was loaded but could not be archived |
 | `duplicate_file` | info | Identical export received again |
+| `downloader_attention` | critical | Copart showed a login or verification page; downloads paused until you run `login` |
+| `downloader_failed` | warning → critical | The download failed (timeout, invalid file, changed page); retried with backoff |
 
 ## Configuration
 

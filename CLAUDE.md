@@ -2,8 +2,8 @@
 
 Continuous ingestion of vehicle-auction CSV exports into PostgreSQL, with a React dashboard
 for monitoring and alerts. Copart is the first provider; others (IAAI, …) plug in without a
-migration. A downloader (out of scope) saves an export into `data/inbox/<provider>/` about
-every hour; saving the file triggers ingestion.
+migration. The Copart downloader (`ingest/downloader`, runs on the host via launchd) saves
+an export into `data/inbox/<provider>/` every hour; saving the file triggers ingestion.
 
 ## Tech stack
 
@@ -22,6 +22,8 @@ every hour; saving the file triggers ingestion.
 ./start.sh --logs               # same, then follow worker/api logs
 docker compose down             # stop (add -v to also drop the database)
 python3 scripts/simulate_export.py   # drop a realistic "next hour" export into the inbox
+./scripts/install_downloader.sh      # schedule the hourly Copart download (macOS launchd)
+(cd backend && .venv/bin/python -m ingest.downloader login|run --force|status)
 
 # backend (from backend/)
 uv sync                         # create .venv with dev dependencies
@@ -78,6 +80,14 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   transaction; the API LISTENs and fans out over SSE (`/api/events`); the UI invalidates
   queries per event type (`frontend/src/lib/events.ts`).
 - Timestamps that measure work use `clock_timestamp()`, not `now()` (transaction start).
+- **Downloader** (`ingest/downloader`, see `docs/downloader.md`): real Chrome via Playwright
+  with a persistent profile; a person logs in with `login`. Pure logic lives in `core.py`
+  (tested with a fake browser); `browser.py` is the only code that touches Copart. It must
+  never enter credentials, solve or bypass a CAPTCHA/bot check, rotate IPs or spoof
+  fingerprints: a login or challenge page pauses downloads and raises a critical alert until
+  a person logs in. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
+  code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
+  `.part` rename.
 
 ## Security rules
 
@@ -94,6 +104,8 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
 - File operations from the API stay inside configured directories (`retry` checks the path
   is under `FAILED_DIR`). CSV content is data: in the UI render it as text, never HTML.
 - Ports bind to `127.0.0.1` only. Set `COOKIE_SECURE=true` when serving over HTTPS.
+- The downloader's Chrome profile (`~/.cars-ingest/copart-profile`, mode 700) holds the Copart
+  session cookie: keep it out of the repo and never copy it elsewhere.
 
 ## Migrations
 
@@ -178,7 +190,10 @@ A code change is not considered complete until the relevant unit tests have been
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
   when download size changes; tune `ROW_COUNT_DEVIATION_RATIO` if it is noisy.
 - Single worker by design (per-provider advisory lock makes a second one safe but idle).
-- Not done yet: downloader, external alert channels, a second provider.
+- Copart downloader built (hourly via launchd, pauses and alerts on login or bot pages).
+  Copart's Image and Data License Agreement governs the data and photos; the owner is
+  checking that automated downloads are allowed.
+- Not done yet: external alert channels, a second provider.
 
 ## Branching
 
