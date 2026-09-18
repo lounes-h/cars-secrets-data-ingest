@@ -16,6 +16,7 @@ from ingest.downloader.core import (
     deliver,
     jitter_seconds,
     next_allowed_attempt,
+    should_auto_sign_in,
     validate_csv,
 )
 
@@ -247,3 +248,27 @@ def test_alerts_are_skipped_quietly_without_database(tmp_path):
 def test_db_url_built_from_compose_env():
     s = DownloaderSettings(_env_file=None, postgres_password="pw", postgres_port=5433)
     assert s.db_url == "postgresql://ingest:pw@127.0.0.1:5433/ingest"
+
+
+@pytest.mark.parametrize("state, user, password, button, tried, expected", [
+    (PageState.LOGIN_REQUIRED, True, True, True, False, True),
+    (PageState.LOGIN_REQUIRED, True, True, True, True, False),  # only once
+    (PageState.LOGIN_REQUIRED, True, False, True, False, False),  # password not saved
+    (PageState.LOGIN_REQUIRED, False, True, True, False, False),
+    (PageState.LOGIN_REQUIRED, True, True, False, False, False),  # no button found
+    (PageState.CHALLENGE, True, True, True, False, False),  # never on a verification page
+    (PageState.READY, True, True, True, False, False),
+])
+def test_should_auto_sign_in(state, user, password, button, tried, expected):
+    assert should_auto_sign_in(state, user, password, button, tried) is expected
+
+
+def test_window_closed_mid_download_gets_a_clear_alert(dsettings, conn):
+    from ingest.downloader.browser import WindowClosed
+
+    def closed(settings, work_dir):
+        raise WindowClosed("the Chrome window was closed before the download finished "
+                           "(leave it open: it closes by itself)")
+
+    assert cli.run_once(dsettings, now=Clock(), fetch=closed) == cli.FAILED
+    assert "window was closed" in open_alerts(conn)[cli.FP_FAILED]["title"]

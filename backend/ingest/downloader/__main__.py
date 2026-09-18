@@ -139,8 +139,9 @@ def _failed(settings: DownloaderSettings, state: State, error: str) -> int:
 def login(settings: DownloaderSettings) -> int:
     from .browser import interactive_login
 
-    print("A Chrome window opens on Copart. Log in there (you type your own credentials);\n"
-          "it closes by itself once the 'Download CSV file' button is reachable.")
+    print("A Chrome window opens on Copart. If Chrome has your login saved, 'Sign in' is\n"
+          "clicked for you; otherwise log in there yourself. The window closes by itself once\n"
+          "the 'Download CSV file' button is reachable.")
     if not interactive_login(settings):
         print("Not logged in (window closed or timed out). Downloads stay paused.")
         return NEEDS_PERSON
