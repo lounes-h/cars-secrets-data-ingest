@@ -4,8 +4,10 @@ fully unit-testable.
 
 Behaviour rules (see docs/downloader.md):
 - one download per MIN_INTERVAL at most, whatever the scheduler does;
-- a login page or any bot challenge stops everything until a person runs `login` again --
-  nothing here tries to get past one;
+- an expired session is renewed by clicking "Sign in" once per run when Chrome's password
+  manager filled the form; after MAX_FAILED_LOGINS runs in a row that do not get in, and at
+  once on any bot challenge, everything stops until a person runs `login` -- nothing here
+  tries to get past a challenge;
 - repeated plain failures back off exponentially.
 """
 
@@ -14,7 +16,8 @@ from __future__ import annotations
 import json
 import os
 import random
-from collections.abc import Iterator
+import re
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime, timedelta
@@ -46,6 +49,19 @@ class DownloaderSettings(BaseSettings):
     max_backoff_hours: int = 6
     download_timeout_seconds: int = 600
     min_file_bytes: int = 1024
+    # Chrome crashing or closing mid-run: relaunch it this many times in all, after a pause.
+    browser_attempts: int = 3
+    browser_retry_seconds: int = 20
+    # Runs in a row where the saved login did not get in before downloads pause (protects
+    # the account from lockout on a wrong saved password).
+    max_failed_logins: int = 3
+    # Extra CSS selectors for close buttons of pop-ups Copart may add, as a JSON list, e.g.
+    # COPART_DISMISS_SELECTORS='["#promo .btn-close"]'. Common dialogs are closed without it.
+    copart_dismiss_selectors: list[str] = []
+    # Pause a random time in this range before each click and after each page load, like a
+    # person reading the page, instead of clicking through at machine speed.
+    action_delay_min_seconds: float = 1.5
+    action_delay_max_seconds: float = 4.0
 
     # Where alerts go (the Postgres published by docker-compose on localhost).
     postgres_password: str = ""
@@ -66,7 +82,8 @@ class DownloaderSettings(BaseSettings):
 
 class PageState(StrEnum):
     READY = "ready"  # logged in, download button present
-    LOGIN_REQUIRED = "login_required"
+    LOGIN_REQUIRED = "login_required"  # login page and Chrome did not fill the saved login
+    SIGN_IN_REJECTED = "sign_in_rejected"  # "Sign in" clicked, still on the login page
     CHALLENGE = "challenge"  # CAPTCHA / bot wall / access denied: a person must look
     UNKNOWN = "unknown"
 
@@ -97,6 +114,35 @@ def should_auto_sign_in(
     wrong password, second factor...)."""
     return (state is PageState.LOGIN_REQUIRED and username_filled and password_filled
             and has_button and not already_tried)
+
+
+# Pop-ups ("what's new", surveys, cookie banners) are closed through a control labelled like
+# this. Only ways to *close* -- never accept, agree or continue on the person's behalf.
+CLOSE_LABEL = re.compile(
+    r"^\s*(close|close (dialog|modal|window|popup)|dismiss|[x\u00d7\u2715\u2716\u2573]"
+    r"|no,? thanks|not now|maybe later|later|skip|got it)\s*[.!]?\s*$",
+    re.IGNORECASE)
+
+
+def is_close_label(label: str | None) -> bool:
+    return bool(label) and CLOSE_LABEL.match(label) is not None
+
+
+def retry[T](
+    fn: Callable[[], T], *, attempts: int, retryable: Callable[[BaseException], bool],
+    pause: Callable[[], None], on_retry: Callable[[int, BaseException], None] | None = None,
+) -> T:
+    """Call fn until it returns, up to `attempts` times, while it raises a retryable error."""
+    for n in range(1, max(attempts, 1) + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if n >= attempts or not retryable(exc):
+                raise
+            if on_retry:
+                on_retry(n, exc)
+            pause()
+    raise AssertionError("unreachable")
 
 
 # --- file validation and hand-off --------------------------------------------------------------
@@ -136,7 +182,9 @@ class State:
     last_attempt_at: str | None = None
     last_success_at: str | None = None
     consecutive_failures: int = 0
-    # Set when Copart shows a login page or a challenge; cleared only by `login`.
+    # Runs in a row that ended on the login page (saved login missing or rejected).
+    failed_logins: int = 0
+    # Set on a challenge, or after max_failed_logins; cleared only by `login`.
     needs_attention: str | None = None
     # The always-on process (daemon.py): when its last hourly cycle started, when it plans
     # the next download, and what it is doing now ('idle' | 'downloading').
@@ -198,6 +246,12 @@ def next_allowed_attempt(state: State, settings: DownloaderSettings) -> datetime
                                       settings.max_backoff_hours))
         wait = max(wait, backoff)
     return last + wait
+
+
+def action_delay_seconds(settings: DownloaderSettings, rng: random.Random | None = None) -> float:
+    lo, hi = sorted((max(settings.action_delay_min_seconds, 0.0),
+                     max(settings.action_delay_max_seconds, 0.0)))
+    return (rng or random).uniform(lo, hi) if hi > 0 else 0.0
 
 
 def jitter_seconds(max_seconds: int, rng: random.Random | None = None) -> float:

@@ -7,8 +7,9 @@ Every few seconds it:
 - catches up after the Mac slept through a planned download, a minute after waking so the
   network is back first.
 
-It plans but never forces past a pause: while Copart needs a login, nothing is scheduled until
-`login` clears it. All I/O is injected, so the loop is tested without Chrome or a real clock.
+It plans but never forces past a pause: after a challenge page, or a saved login that failed
+several runs in a row, nothing is scheduled until `login` clears it. All I/O is injected, so
+the loop is tested without Chrome or a real clock.
 """
 
 from __future__ import annotations
@@ -47,6 +48,17 @@ def plan_next_run(
     return max(max(base, allowed) + jitter, now)
 
 
+def lift_login_pause(state: State, settings: DownloaderSettings) -> bool:
+    """A login pause written before runs could sign in by themselves (so without the failed
+    attempts that justify one now) is lifted: the next run tries the saved login. Challenge
+    pauses always stay."""
+    if (state.needs_attention in ("login_required", "sign_in_rejected")
+            and state.failed_logins < settings.max_failed_logins):
+        state.needs_attention = None
+        return True
+    return False
+
+
 @dataclass
 class Daemon:
     settings: DownloaderSettings
@@ -80,6 +92,8 @@ class Daemon:
         state = self._load()
         state.activity = "idle"
         state.next_run_at = None  # replanned on the first tick
+        if lift_login_pause(state, self.settings):
+            log.info("downloader.login_pause_lifted", hint="the saved login will be tried")
         state.save(self.settings.state_file)
         self.publish(state, heartbeat=True, started_at=now)
         self._last_heartbeat = now

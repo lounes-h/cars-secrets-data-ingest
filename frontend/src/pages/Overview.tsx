@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { pauseReason } from "../components/NextDownload";
 import { RunCharts } from "../components/RunCharts";
 import { Icon, QueryState, RunStatusBadge, SeverityBadge, StatTile } from "../components/ui";
 import { api, type Downloader, type Overview } from "../lib/api";
@@ -24,7 +25,7 @@ export function downloaderLine(d: Downloader): [Tone, ReactNode] {
     case "requested":
       return ["good", <>Downloader running · download requested</>];
     case "paused":
-      return ["critical", <>Downloader paused · Copart needs you to log in again</>];
+      return ["critical", <>Downloader paused · {pauseReason(d.needs_attention)}</>];
     case "not_running":
       return ["critical", <>Downloader not running{d.heartbeat_at ? <> since {clockTime(d.heartbeat_at)}</> : null} · it restarts on its own; otherwise run <code>./start.sh</code></>];
     default:
