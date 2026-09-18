@@ -24,7 +24,7 @@ the pipeline picks it up (`data/inbox/copart/`).
   close button in `COPART_DISMISS_SELECTORS` (no code change).
 - **At a person's pace.** It waits a random 1.5–4 s after each page loads and before each
   click (sign in, close, download) instead of clicking through at machine speed.
-- **Survives Chrome crashes.** If Chrome crashes, hangs or its window is closed mid-run, it is
+- **Survives Chrome crashes.** If Chrome still crashes, hangs or its window is closed mid-run, it is
   relaunched (up to 3 attempts, 20 s apart) within the same run. Before each launch, Chrome
   processes a crashed run left on the profile are stopped and the stale profile lock is
   removed, so a crash never blocks the next launch; the "Restore pages?" bubble is hidden.
@@ -42,10 +42,18 @@ the pipeline picks it up (`data/inbox/copart/`).
   a row.
 - **The window closes by itself** when the file is saved. Closing it early just makes the run
   relaunch Chrome.
-- **Only complete, valid files reach the pipeline.** Chrome writes the download into
-  `data/.downloads/`, which is cleared at the start of each run. The finished file is renamed
-  (never copied) and checked: it must be a CSV whose header has `Lot number`, which rules out an HTML
-  error page. It is then moved into the inbox as `salesdata_<UTC time>.csv` via a `.part`
+- **The file never goes through Chrome's download manager.** Chrome 153 on macOS crashes
+  (segfault, "Google Chrome quit unexpectedly") while finalizing large downloads: in tests,
+  4 of 5 downloads of an 88 MB file crashed it. So when the button is clicked, the request
+  still goes out through Chrome (same session, cookies and connection), but the response body
+  is read over the DevTools protocol and written to `data/.downloads/salesdata.csv` by the
+  downloader itself; the navigation is then cancelled. A response counts as the file when it
+  is an attachment or `application/octet-stream`/CSV; an HTML page loads normally. If the
+  file ever opens in a new tab, the usual Chrome download is used as a fallback.
+- **Only complete, valid files reach the pipeline.** `data/.downloads/` is cleared at the
+  start of each run, and the file is written under a `.part` name until complete. It is then
+  checked: it must be a CSV whose header has `Lot number`, which rules out an HTML error
+  page. It is then moved into the inbox as `salesdata_<UTC time>.csv` via a `.part`
   name, so the worker never reads a half-written file. An invalid file goes to
   `data/failed/downloader/` instead.
 

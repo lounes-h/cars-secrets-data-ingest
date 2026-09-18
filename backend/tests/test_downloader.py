@@ -16,6 +16,7 @@ from ingest.downloader.core import (
     classify_page,
     deliver,
     is_close_label,
+    is_file_response,
     jitter_seconds,
     next_allowed_attempt,
     retry,
@@ -361,6 +362,20 @@ def test_retry_gives_up_after_the_last_attempt_or_on_other_errors():
     with pytest.raises(ValueError):
         retry(broken, attempts=5, retryable=lambda e: isinstance(e, Flaky), pause=lambda: None)
     assert len(calls) == 3  # not retried
+
+
+@pytest.mark.parametrize("status, headers, expected", [
+    (200, {"Content-Type": "application/octet-stream"}, True),  # what Copart sends
+    (200, {"content-type": "text/csv; charset=utf-8"}, True),
+    (200, {"Content-Type": "text/plain", "Content-Disposition": 'attachment; filename="x"'},
+     True),
+    (200, {"Content-Type": "text/html; charset=utf-8"}, False),  # a page: let it load
+    (200, {}, False),
+    (302, {"Content-Type": "application/octet-stream"}, False),  # redirects are followed
+    (500, {"Content-Disposition": "attachment"}, False),
+])
+def test_is_file_response(status, headers, expected):
+    assert is_file_response(status, headers) is expected
 
 
 @pytest.mark.parametrize("label, expected", [

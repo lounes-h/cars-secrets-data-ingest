@@ -9,6 +9,7 @@ page. When Chrome crashes or closes mid-run it is relaunched a few times before 
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import re
@@ -27,6 +28,7 @@ from .core import (
     PageState,
     action_delay_seconds,
     classify_page,
+    is_file_response,
     retry,
     should_auto_sign_in,
 )
@@ -289,10 +291,84 @@ def _same_page(url: str, target: str) -> bool:
     return strip(url) == strip(target)
 
 
-def _click_download(page, button, settings: DownloaderSettings):
+class _ResponseCapture:
+    """Saves the export straight from the network response instead of letting Chrome's
+    download manager handle it: Chrome 153 on macOS crashes (SIGSEGV on its main thread) while
+    finalizing large downloads, most of the time for a ~90 MB export. The request still goes
+    through Chrome itself (same session, cookies and connection); only the response body is
+    read over the DevTools protocol and written to `target`, and the navigation is then
+    cancelled, so the page stays where it is and Chrome never starts a download."""
+
+    def __init__(self, page, target: Path):
+        self.page, self.target = page, target
+        self.done = False
+        self.error: BaseException | None = None
+        self.cdp = None
+
+    def __enter__(self) -> _ResponseCapture:
+        self.cdp = self.page.context.new_cdp_session(self.page)
+        self.cdp.on("Fetch.requestPaused", lambda event: self._on_paused(event))
+        self.cdp.send("Fetch.enable", {"patterns": [
+            {"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"}]})
+        return self
+
+    def __exit__(self, *exc) -> None:
+        with contextlib.suppress(Exception):
+            self.cdp.send("Fetch.disable")
+        with contextlib.suppress(Exception):
+            self.cdp.detach()
+
+    def _on_paused(self, event: dict) -> None:
+        request_id = event["requestId"]
+        try:
+            headers = {h["name"]: h["value"] for h in event.get("responseHeaders") or []}
+            if self.done or not is_file_response(event.get("responseStatusCode") or 0, headers):
+                self.cdp.send("Fetch.continueRequest", {"requestId": request_id})
+                return
+            log.info("downloader.response_capture", url=event["request"]["url"].split("?")[0])
+            self._save(request_id)
+            self.done = True
+        except Exception as exc:  # noqa: BLE001 - reported to the waiting loop
+            self.error = exc
+            with contextlib.suppress(Exception):
+                self.cdp.send("Fetch.failRequest", {"requestId": request_id,
+                                                    "errorReason": "Aborted"})
+
+    def _save(self, request_id: str) -> None:
+        stream = self.cdp.send("Fetch.takeResponseBodyAsStream",
+                               {"requestId": request_id})["stream"]
+        part = self.target.with_name(self.target.name + ".part")
+        try:
+            with open(part, "wb") as fh:
+                while True:
+                    chunk = self.cdp.send("IO.read", {"handle": stream, "size": 1 << 20})
+                    data = chunk.get("data", "")
+                    fh.write(base64.b64decode(data) if chunk.get("base64Encoded")
+                             else data.encode())
+                    if chunk.get("eof"):
+                        break
+        finally:
+            with contextlib.suppress(Exception):
+                self.cdp.send("IO.close", {"handle": stream})
+        # Cancel the navigation: the file is saved, the page stays on the data page.
+        with contextlib.suppress(Exception):
+            self.cdp.send("Fetch.failRequest", {"requestId": request_id,
+                                                "errorReason": "Aborted"})
+        os.replace(part, self.target)
+
+
+def _click_download(page, button, settings: DownloaderSettings, target: Path) -> Path:
+    """Click the download button and save the export to `target`; returns it when complete."""
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
-    with page.expect_download(timeout=settings.download_timeout_seconds * 1000) as info:
+    # Fallback if the file ever arrives as a Chrome download anyway (e.g. opened in a new
+    # tab, which the capture does not watch).
+    downloads: list = []
+    for p in page.context.pages:
+        p.on("download", lambda d: downloads.append(d))
+    page.context.on("page", lambda p: p.on("download", lambda d: downloads.append(d)))
+
+    with _ResponseCapture(page, target) as capture:
         for attempt in range(3):
             _human_pause(page, settings)
             try:
@@ -302,7 +378,20 @@ def _click_download(page, button, settings: DownloaderSettings):
                 # Something covers the button, typically a pop-up that appeared late.
                 if attempt == 2 or not dismiss_dialogs(page, settings):
                     raise
-    return info.value
+        deadline = time.monotonic() + settings.download_timeout_seconds
+        while time.monotonic() < deadline:
+            if capture.error is not None:
+                raise capture.error
+            if capture.done:
+                return target
+            if downloads:
+                # Chrome writes the file into work_dir itself; path() waits until it is
+                # complete. Renaming it (same directory) avoids a ~100 MB copy.
+                os.replace(Path(downloads[0].path()), target)
+                return target
+            page.wait_for_timeout(250)
+    raise PlaywrightTimeout(
+        f"no file received within {settings.download_timeout_seconds} s of the click")
 
 
 def _download_once(
@@ -320,14 +409,7 @@ def _download_once(
             state, button = reach_data_page(page, settings)
             if state is not PageState.READY:
                 return state, None
-            dl = _click_download(page, button, settings)
-            # Chrome writes the file into work_dir itself; path() waits until it is complete.
-            # Renaming it (same directory, instant) avoids a ~100 MB copy that would break if
-            # the window were closed meanwhile.
-            finished = Path(dl.path())
-            target = work_dir / "salesdata.csv"
-            os.replace(finished, target)
-            return state, target
+            return state, _click_download(page, button, settings, work_dir / "salesdata.csv")
         finally:
             with contextlib.suppress(Exception):
                 context.close()

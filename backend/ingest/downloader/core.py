@@ -145,6 +145,21 @@ def retry[T](
     raise AssertionError("unreachable")
 
 
+_FILE_TYPES = ("text/csv", "application/csv", "application/octet-stream",
+               "application/vnd.ms-excel", "application/force-download")
+
+
+def is_file_response(status: int, headers: dict[str, str]) -> bool:
+    """Is this navigation response a file to save (the export), rather than a page to show?
+    Copart serves the export as application/octet-stream."""
+    if not 200 <= status < 300:
+        return False
+    lower = {k.lower(): v.lower() for k, v in headers.items()}
+    if "attachment" in lower.get("content-disposition", ""):
+        return True
+    return lower.get("content-type", "").split(";")[0].strip() in _FILE_TYPES
+
+
 # --- file validation and hand-off --------------------------------------------------------------
 
 class InvalidDownload(Exception):
