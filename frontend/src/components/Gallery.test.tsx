@@ -34,4 +34,24 @@ describe("Gallery", () => {
     expect((screen.getByAltText("x, photo 1 of 1") as HTMLImageElement).src).toBe("https://cs.copart.com/t.jpg");
     expect(screen.queryByLabelText("Next photo")).toBeNull();
   });
+
+  it("links to the auction site when only part of the photos is available", () => {
+    const one = [{ thumb: "https://cs.copart.com/t_thb.jpg", full: "https://cs.copart.com/t_ful.jpg", hd: null }];
+    render(<Gallery images={one} alt="x" complete={false} moreUrl="https://www.copart.com/lot/63265186" />);
+    const link = screen.getByText(/See all photos/);
+    expect(link).toHaveAttribute("href", "https://www.copart.com/lot/63265186");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByText("Only this photo is available here.")).toBeInTheDocument();
+  });
+
+  it("shows no link when the photo list is complete", () => {
+    render(<Gallery images={images} alt="x" complete moreUrl="https://www.copart.com/lot/1" />);
+    expect(screen.queryByText(/See all photos/)).toBeNull();
+  });
+
+  it("offers the link even when there is no photo at all", () => {
+    render(<Gallery images={[]} alt="x" complete={false} moreUrl="https://www.copart.com/lot/1" />);
+    expect(screen.getByText("No photos for this lot.")).toBeInTheDocument();
+    expect(screen.getByText(/See all photos/)).toBeInTheDocument();
+  });
 });

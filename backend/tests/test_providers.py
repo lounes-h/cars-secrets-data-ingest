@@ -72,7 +72,9 @@ def test_copart_images_lists_every_photo_in_sequence_order():
                                      link("https://cs.copart.com/a_thb.jpg", thumb=True)]},
         ]}
 
-    images = copart.images(LOT, get_json)
+    result = copart.images(LOT, get_json)
+    images = result.images
+    assert result.complete is True
     # always HTTPS, even though the export stores an http:// link
     assert calls == ["https://inventoryv2.copart.io/v1/lotImages/41633106?country=us&yardNumber=1"]
     assert [i.full for i in images] == ["https://cs.copart.com/a_ful.jpg",
@@ -89,16 +91,35 @@ def test_copart_images_drops_foreign_hosts_and_engine_sounds():
             {"sequence": 3, "link": [link("https://cs.copart.com/ok_ful.jpg")]},
         ]}
 
-    assert [i.full for i in copart.images(LOT, get_json)] == ["https://cs.copart.com/ok_ful.jpg"]
+    assert [i.full for i in copart.images(LOT, get_json).images] == [
+        "https://cs.copart.com/ok_ful.jpg"]
 
 
 def test_copart_images_falls_back_to_export_thumbnail():
     def failing(url):
         raise OSError("timeout")
 
-    (image,) = copart.images(LOT, failing)
+    result = copart.images(LOT, failing)
+    (image,) = result.images
     assert image.thumb == THUMB
     assert image.full == THUMB.replace("_thb.", "_ful.")
+    assert result.complete is False  # the UI then links to the lot page for all photos
+
+
+def test_copart_image_api_404_counts_as_incomplete():
+    """Real case, lot 63265186: the API answers a 404 body although copart.com shows 12
+    photos."""
+    def not_found(url):
+        return {"status": 404, "message": "No message available"}
+
+    result = copart.images(LOT, not_found)
+    assert [i.thumb for i in result.images] == [THUMB] and result.complete is False
+
+
+def test_copart_listing_url():
+    assert copart.listing_url("63265186") == "https://www.copart.com/lot/63265186"
+    assert copart.listing_url("1/../x") == "https://www.copart.com/lot/1%2F..%2Fx"
+    assert COPART.listing_url is copart.listing_url
 
 
 def test_copart_images_never_calls_an_unexpected_host():
@@ -106,6 +127,7 @@ def test_copart_images_never_calls_an_unexpected_host():
         raise AssertionError("must not be called")
 
     lot = {**LOT, "image_url": "http://169.254.169.254/v1/lotImages/1"}
-    assert [i.thumb for i in copart.images(lot, get_json)] == [THUMB]
-    assert copart.images({"lot_number": "1"}, get_json) == []
-    assert copart.images({"thumbnail_url": "https://elsewhere.com/a_thb.jpg"}, get_json) == []
+    assert [i.thumb for i in copart.images(lot, get_json).images] == [THUMB]
+    assert copart.images({"lot_number": "1"}, get_json).images == []
+    assert copart.images({"thumbnail_url": "https://elsewhere.com/a_thb.jpg"},
+                         get_json).images == []

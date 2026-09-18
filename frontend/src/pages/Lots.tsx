@@ -108,13 +108,21 @@ export function LotDetailPage() {
           {title}{" "}
           <span className="muted">· lot {lot.lot_number}</span>
         </h1>
-        {lot.removed_at ? <Badge tone="neutral">removed {dateTime(lot.removed_at)}</Badge> : <Badge tone="good">active</Badge>}
+        <div className="lot-actions">
+          {lot.removed_at ? <Badge tone="neutral">removed {dateTime(lot.removed_at)}</Badge> : <Badge tone="good">active</Badge>}
+          {lot.listing_url && (
+            <a className="button-link" href={lot.listing_url} target="_blank" rel="noopener noreferrer">
+              View on {lot.source === "copart" ? "Copart" : lot.source} ↗
+            </a>
+          )}
+        </div>
       </div>
       <div className="grid two-col">
         <div className="card">
           {photos.isLoading
             ? <div className="gallery-empty muted">Loading photos…</div>
-            : <Gallery images={photos.data?.images ?? []} alt={title} />}
+            : <Gallery images={photos.data?.images ?? []} alt={title}
+                complete={photos.data?.complete ?? false} moreUrl={lot.listing_url} />}
         </div>
         <div className="card">
           <h2>Summary</h2>

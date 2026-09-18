@@ -88,17 +88,25 @@ A removed lot that reappears is active again.
 
 Exports only carry a thumbnail and a link to the provider's image API. `Provider.fetch_images`
 turns the stored lot into a list of photos (thumbnail / full / HD). For Copart it calls
-`https://inventoryv2.copart.io/v1/lotImages/<lot>` and, if that fails, derives the full-size
-photo from the thumbnail (`_thb` → `_ful`). The API endpoint
-`GET /api/lots/{source}/{lot_number}/images` caches the result for 15 minutes. Browsers load
-the photos straight from `cs.copart.com`.
+`https://inventoryv2.copart.io/v1/lotImages/<lot>`. For some lots, about 1 in 6–12 (they look
+like lots on Copart's newer image store), that API answers 404 even though copart.com shows
+their photos. Copart's site loads those through member-only endpoints, which we deliberately
+don't call. In that case the full-size photo is derived from the export's thumbnail
+(`_thb` → `_ful`) and the result is marked `complete: false`. The lot page then shows a
+"See all photos on the auction site" link.
+
+The endpoint `GET /api/lots/{source}/{lot_number}/images` returns `{images, complete}`, cached
+for 15 minutes. Browsers load the photos straight from `cs.copart.com`. Each lot also carries
+`listing_url` (`Provider.listing_url`, Copart: `https://www.copart.com/lot/<n>`): its page on
+the auction site, where dealers go to bid.
 
 ## Adding a provider
 
 1. Create `backend/ingest/providers/<name>.py` defining a `Provider`: key aliases and key
    parser, `FieldMapping`s onto canonical columns, `ignored_columns`, `volatile_columns`, an
    optional `derive` for columns built from several source values, `removal_scope`
-   (`None` if every export is a full snapshot) and optionally `fetch_images`.
+   (`None` if every export is a full snapshot) and optionally `fetch_images` and
+   `listing_url`.
 2. Register it in `providers/__init__.py`.
 3. Add it to `ENABLED_PROVIDERS` so the staleness check covers it.
 4. Save its files into `data/inbox/<name>/`. The worker creates the folder on start.

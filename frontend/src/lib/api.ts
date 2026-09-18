@@ -125,7 +125,13 @@ export interface Lot {
 }
 
 export interface LotDetail {
-  lot: Lot & { attributes: Record<string, string>; first_file_id: number; last_file_id: number };
+  lot: Lot & {
+    attributes: Record<string, string>;
+    first_file_id: number;
+    last_file_id: number;
+    /** The lot's page on the auction site (all photos, bidding). */
+    listing_url: string | null;
+  };
   history: {
     changed_at: string;
     file_id: number | null;
@@ -196,7 +202,7 @@ export const api = {
   lot: (source: string, lotNumber: string) =>
     request<LotDetail>("GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}`),
   lotImages: (source: string, lotNumber: string) =>
-    request<{ images: LotImage[] }>(
+    request<{ images: LotImage[]; complete: boolean }>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/images`),
 };
 
