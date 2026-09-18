@@ -1,0 +1,88 @@
+# Start everything with ./start.sh (it creates .env with generated secrets first).
+name: cars-ingest
+
+x-backend: &backend
+  build: ./backend
+  image: cars-ingest-backend
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  environment:
+    DATABASE_URL: postgresql://ingest:${POSTGRES_PASSWORD:?run ./start.sh to create .env}@db:5432/ingest
+    ENABLED_PROVIDERS: ${ENABLED_PROVIDERS:-copart}
+    STALE_AFTER_MINUTES: ${STALE_AFTER_MINUTES:-75}
+    ARCHIVE_RETENTION_DAYS: ${ARCHIVE_RETENTION_DAYS:-7}
+    ROW_COUNT_DEVIATION_RATIO: ${ROW_COUNT_DEVIATION_RATIO:-0.3}
+    REMOVAL_GRACE_MINUTES: ${REMOVAL_GRACE_MINUTES:-120}
+    INBOX_DIR: /data/inbox
+    ARCHIVE_DIR: /data/archive
+    FAILED_DIR: /data/failed
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ingest
+      POSTGRES_DB: ingest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./start.sh to create .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"  # local tools only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ingest -d ingest"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "ingest.worker"]
+    volumes:
+      - ./data:/data
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "ingest.api.app:app_factory", "--factory", "--host", "0.0.0.0",
+              "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment:
+      DATABASE_URL: postgresql://ingest:${POSTGRES_PASSWORD}@db:5432/ingest
+      ENABLED_PROVIDERS: ${ENABLED_PROVIDERS:-copart}
+      STALE_AFTER_MINUTES: ${STALE_AFTER_MINUTES:-75}
+      INBOX_DIR: /data/inbox
+      ARCHIVE_DIR: /data/archive
+      FAILED_DIR: /data/failed
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?run ./start.sh to create .env}
+      SESSION_SECRET: ${SESSION_SECRET:?run ./start.sh to create .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - ./data:/data  # "retry" moves a failed file back into the inbox
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8080}:80"
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:

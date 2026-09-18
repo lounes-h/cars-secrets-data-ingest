@@ -1,0 +1,445 @@
+"""Dashboard API: pipeline status, runs, alerts, schema registry, lot explorer, live events."""
+
+import asyncio
+import contextlib
+import shutil
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+import psycopg
+import structlog
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
+
+from ..config import Settings, get_settings
+from ..db import EVENTS_CHANNEL
+from ..log_config import configure_logging
+from ..monitor import run_checks
+from ..providers import PROVIDERS
+from . import auth
+
+log = structlog.get_logger()
+
+LOT_COLUMNS = """source, lot_number, year, make, model_group, model_detail, trim, vin,
+    damage_primary, damage_secondary, odometer, est_retail_value, repair_cost, high_bid,
+    buy_it_now_price, currency, sale_status, sale_at, yard_code, yard_name, location_city,
+    location_state, thumbnail_url, first_seen_at, last_seen_at, last_changed_at, removed_at"""
+
+
+class TTLCache:
+    """Small in-process cache (photo lists change rarely; Copart is not called per page view)."""
+
+    def __init__(self, ttl_seconds: float, max_items: int = 500, clock=time.monotonic):
+        self.ttl, self.max_items, self.clock = ttl_seconds, max_items, clock
+        self._items: dict[Any, tuple[float, Any]] = {}
+
+    def get(self, key: Any) -> Any | None:
+        hit = self._items.get(key)
+        if hit is None or hit[0] < self.clock():
+            self._items.pop(key, None)
+            return None
+        return hit[1]
+
+    def put(self, key: Any, value: Any) -> None:
+        if len(self._items) >= self.max_items:
+            self._items.pop(next(iter(self._items)))  # oldest insertion
+        self._items[key] = (self.clock() + self.ttl, value)
+
+
+class EventBroker:
+    """Fans Postgres NOTIFY events out to every open SSE stream."""
+
+    def __init__(self) -> None:
+        self.subscribers: set[asyncio.Queue[str]] = set()
+
+    def publish(self, payload: str) -> None:
+        for q in list(self.subscribers):
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(payload)
+
+    async def listen(self, url: str) -> None:
+        while True:
+            try:
+                async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
+                    await conn.execute(f"LISTEN {EVENTS_CHANNEL}")
+                    async for note in conn.notifies():
+                        self.publish(note.payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - reconnect whatever went wrong
+                log.exception("events.listen_failed")
+                await asyncio.sleep(3)
+
+
+async def monitor_loop(pool: ConnectionPool, settings: Settings) -> None:
+    def check() -> None:
+        with pool.connection() as conn:
+            run_checks(conn, settings)
+
+    while True:
+        try:
+            await asyncio.to_thread(check)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("monitor.failed")
+        await asyncio.sleep(settings.monitor_interval_seconds)
+
+
+def create_app(settings: Settings | None = None, *, background: bool = True) -> FastAPI:
+    settings = settings or get_settings()
+    auth.check_auth_settings(settings)
+    pool = ConnectionPool(
+        settings.database_url, min_size=1, max_size=10, open=False,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    broker = EventBroker()
+    limiter = auth.LoginRateLimiter()
+    image_cache = TTLCache(ttl_seconds=15 * 60)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        configure_logging()
+        pool.open()
+        tasks = []
+        if background:
+            tasks = [asyncio.create_task(broker.listen(settings.database_url)),
+                     asyncio.create_task(monitor_loop(pool, settings))]
+        yield
+        for t in tasks:
+            t.cancel()
+        pool.close()
+
+    app = FastAPI(title="Ingest dashboard API", lifespan=lifespan, docs_url="/api/docs",
+                  openapi_url="/api/openapi.json")
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.pool, app.state.broker = pool, broker
+
+    def db() -> Iterator[psycopg.Connection]:
+        with pool.connection() as conn:
+            yield conn
+
+    Conn = Annotated[psycopg.Connection, Depends(db)]
+    User = Annotated[str, Depends(auth.current_user)]
+
+    public = APIRouter(prefix="/api")
+    api = APIRouter(prefix="/api", dependencies=[Depends(auth.current_user)])
+
+    # --- auth ----------------------------------------------------------------------------------
+    class Login(BaseModel):
+        username: str
+        password: str
+
+    @public.post("/auth/login")
+    def login(body: Login, request: Request, response: Response) -> dict[str, str]:
+        client = request.client.host if request.client else "unknown"
+        if limiter.blocked(client):
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many failed attempts")
+        if not auth.credentials_valid(body.username, body.password, settings):
+            limiter.failure(client)
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+        limiter.reset(client)
+        response.set_cookie(
+            auth.COOKIE_NAME, auth.issue_token(body.username, settings),
+            max_age=settings.session_max_age_seconds, httponly=True, samesite="strict",
+            secure=settings.cookie_secure, path="/",
+        )
+        return {"username": body.username}
+
+    @public.post("/auth/logout", status_code=204)
+    def logout(response: Response) -> None:
+        response.delete_cookie(auth.COOKIE_NAME, path="/")
+
+    @api.get("/auth/me")
+    def me(user: User) -> dict[str, str]:
+        return {"username": user}
+
+    @public.get("/health")
+    def health(conn: Conn) -> dict[str, str]:
+        conn.execute("SELECT 1")
+        return {"status": "ok"}
+
+    # --- overview --------------------------------------------------------------------------------
+    @api.get("/overview")
+    def overview(conn: Conn) -> dict[str, Any]:
+        worker = conn.execute(
+            """SELECT worker_id, state, started_at, last_beat_at,
+                      last_beat_at > now() - make_interval(secs => %s) AS healthy
+               FROM worker_heartbeat ORDER BY last_beat_at DESC LIMIT 1""",
+            (settings.heartbeat_timeout_seconds,),
+        ).fetchone()
+        alerts = {r["severity"]: r["n"] for r in conn.execute(
+            "SELECT severity, count(*) AS n FROM alerts WHERE resolved_at IS NULL GROUP BY 1"
+        )}
+        lots = conn.execute(
+            """SELECT count(*) FILTER (WHERE removed_at IS NULL)                     AS active,
+                      count(*) FILTER (WHERE removed_at IS NOT NULL)                 AS removed,
+                      count(*) FILTER (WHERE first_seen_at > now() - interval '24h') AS new_24h,
+                      count(*) FILTER (WHERE removed_at > now() - interval '24h')    AS removed_24h,
+                      (SELECT count(DISTINCT (source, lot_number)) FROM lot_versions
+                       WHERE valid_to > now() - interval '24h')                     AS changed_24h
+               FROM lots"""
+        ).fetchone()
+        sources = sorted(set(settings.providers) | {
+            r["source"] for r in conn.execute("SELECT DISTINCT source FROM ingest_files")
+        })
+        providers = []
+        for source in sources:
+            last_run = conn.execute(
+                """SELECT id, filename, status, received_at, finished_at, rows_total, rows_new,
+                          rows_updated, rows_removed, rows_rejected
+                   FROM ingest_files WHERE source = %s ORDER BY id DESC LIMIT 1""",
+                (source,),
+            ).fetchone()
+            last_success = conn.execute(
+                """SELECT max(finished_at) AS at FROM ingest_files
+                   WHERE source = %s AND status = 'succeeded'""",
+                (source,),
+            ).fetchone()["at"]
+            active = conn.execute(
+                "SELECT count(*) AS n FROM lots WHERE source = %s AND removed_at IS NULL",
+                (source,),
+            ).fetchone()["n"]
+            providers.append({
+                "source": source,
+                "display_name": PROVIDERS[source].display_name if source in PROVIDERS else source,
+                "last_run": last_run, "last_success_at": last_success, "lots_active": active,
+                "stale_after_minutes": settings.stale_after_minutes,
+            })
+        health = ("down" if alerts.get("critical") or not (worker and worker["healthy"])
+                  else "degraded" if alerts.get("warning") else "healthy")
+        return {
+            "health": health, "worker": worker, "providers": providers, "lots": lots,
+            "alerts_open": {s: alerts.get(s, 0) for s in ("critical", "warning", "info")},
+            "now": conn.execute("SELECT now() AS now").fetchone()["now"],
+        }
+
+    # --- runs ------------------------------------------------------------------------------------
+    RUN_COLUMNS = """id, source, filename, sha256, size_bytes, status, received_at, started_at,
+        finished_at, extract(epoch FROM finished_at - started_at)::float AS duration_seconds,
+        rows_total, rows_new, rows_updated, rows_unchanged, rows_rejected, rows_removed,
+        removal_skipped, error"""
+
+    @api.get("/runs")
+    def runs(
+        conn: Conn, source: str | None = None,
+        status_: Annotated[str | None, Query(alias="status")] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        where = "WHERE (%(source)s::text IS NULL OR source = %(source)s) " \
+                "AND (%(status)s::text IS NULL OR status = %(status)s)"
+        params = {"source": source, "status": status_, "limit": limit, "offset": offset}
+        items = conn.execute(
+            f"SELECT {RUN_COLUMNS} FROM ingest_files {where} "
+            "ORDER BY id DESC LIMIT %(limit)s OFFSET %(offset)s", params,
+        ).fetchall()
+        total = conn.execute(f"SELECT count(*) AS n FROM ingest_files {where}", params).fetchone()
+        return {"items": items, "total": total["n"]}
+
+    @api.get("/runs/{run_id}")
+    def run_detail(run_id: int, conn: Conn) -> dict[str, Any]:
+        run = conn.execute(
+            f"SELECT {RUN_COLUMNS}, columns, field_errors, archived_path "
+            "FROM ingest_files WHERE id = %s", (run_id,),
+        ).fetchone()
+        if run is None:
+            raise HTTPException(404, "run not found")
+        rejected = conn.execute(
+            """SELECT line_no, reason, raw FROM rejected_rows WHERE file_id = %s
+               ORDER BY line_no LIMIT 200""", (run_id,),
+        ).fetchall()
+        alerts = conn.execute(
+            """SELECT id, severity, type, title, created_at, resolved_at FROM alerts
+               WHERE file_id = %s ORDER BY id""", (run_id,),
+        ).fetchall()
+        return {"run": run, "rejected_rows": rejected, "alerts": alerts}
+
+    @api.post("/runs/{run_id}/retry", status_code=202)
+    def retry_run(run_id: int, conn: Conn) -> dict[str, str]:
+        """Put a failed file back into its inbox; the worker picks it up again."""
+        run = conn.execute(
+            "SELECT source, filename, status, archived_path FROM ingest_files WHERE id = %s",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise HTTPException(404, "run not found")
+        if run["status"] != "failed" or not run["archived_path"]:
+            raise HTTPException(409, "only failed runs whose file was kept can be retried")
+        failed_root = settings.failed_dir.resolve()
+        src = Path(run["archived_path"]).resolve()
+        if not src.is_relative_to(failed_root) or not src.is_file():
+            raise HTTPException(409, "the failed file is no longer available")
+        if run["source"] not in PROVIDERS:
+            raise HTTPException(409, f"unknown provider {run['source']!r}")
+        target = settings.inbox_dir / run["source"] / Path(run["filename"]).name
+        if target.exists():
+            raise HTTPException(409, f"{target.name} is already waiting in the inbox")
+        shutil.move(str(src), target)
+        conn.execute("UPDATE ingest_files SET archived_path = NULL WHERE id = %s", (run_id,))
+        return {"status": "requeued", "file": target.name}
+
+    # --- alerts ----------------------------------------------------------------------------------
+    @api.get("/alerts")
+    def alerts(
+        conn: Conn, state: Literal["open", "resolved", "all"] = "open",
+        severity: Literal["info", "warning", "critical"] | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100, offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        where = ["TRUE"]
+        if state == "open":
+            where.append("resolved_at IS NULL")
+        elif state == "resolved":
+            where.append("resolved_at IS NOT NULL")
+        if severity:
+            where.append("severity = %(severity)s")
+        clause = " AND ".join(where)
+        params = {"severity": severity, "limit": limit, "offset": offset}
+        items = conn.execute(
+            f"""SELECT * FROM alerts WHERE {clause}
+                ORDER BY resolved_at IS NULL DESC,
+                         array_position(ARRAY['critical','warning','info'], severity),
+                         last_seen_at DESC
+                LIMIT %(limit)s OFFSET %(offset)s""", params,
+        ).fetchall()
+        total = conn.execute(f"SELECT count(*) AS n FROM alerts WHERE {clause}", params).fetchone()
+        return {"items": items, "total": total["n"]}
+
+    def _alert_action(conn: psycopg.Connection, alert_id: int, sql: str, user: str) -> dict:
+        row = conn.execute(sql, (user, alert_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "alert not found or already resolved")
+        conn.execute("SELECT pg_notify(%s, %s)", (EVENTS_CHANNEL, '{"type":"alert_updated"}'))
+        return row
+
+    @api.post("/alerts/{alert_id}/ack")
+    def ack_alert(alert_id: int, conn: Conn, user: User) -> dict:
+        return _alert_action(conn, alert_id, """UPDATE alerts SET acked_at = now(), acked_by = %s
+            WHERE id = %s AND resolved_at IS NULL RETURNING *""", user)
+
+    @api.post("/alerts/{alert_id}/resolve")
+    def resolve_alert(alert_id: int, conn: Conn, user: User) -> dict:
+        return _alert_action(conn, alert_id, """UPDATE alerts SET resolved_at = now(),
+            resolved_by = %s WHERE id = %s AND resolved_at IS NULL RETURNING *""", user)
+
+    # --- schema ----------------------------------------------------------------------------------
+    @api.get("/schema")
+    def schema(conn: Conn, source: str | None = None) -> dict[str, Any]:
+        items = conn.execute(
+            """SELECT * FROM column_registry WHERE (%(s)s::text IS NULL OR source = %(s)s)
+               ORDER BY source, status DESC, first_seen_at, normalized_name""", {"s": source},
+        ).fetchall()
+        return {"items": items}
+
+    # --- lots ------------------------------------------------------------------------------------
+    @api.get("/lots")
+    def lots(
+        conn: Conn, q: str = "", source: str | None = None,
+        state: Literal["active", "removed", "all"] = "all",
+        limit: Annotated[int, Query(ge=1, le=200)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        where = ["(%(source)s::text IS NULL OR source = %(source)s)"]
+        if state == "active":
+            where.append("removed_at IS NULL")
+        elif state == "removed":
+            where.append("removed_at IS NOT NULL")
+        q = q.strip()
+        if q:
+            where.append("""(lot_number = %(q)s OR vin = upper(%(q)s)
+                             OR make ILIKE %(prefix)s OR model_group ILIKE %(prefix)s)""")
+        clause = " AND ".join(where)
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params = {"source": source, "q": q, "prefix": escaped + "%",
+                  "limit": limit, "offset": offset}
+        items = conn.execute(
+            f"""SELECT {LOT_COLUMNS} FROM lots WHERE {clause}
+                ORDER BY last_changed_at DESC LIMIT %(limit)s OFFSET %(offset)s""", params,
+        ).fetchall()
+        return {"items": items}
+
+    @api.get("/lots/{source}/{lot_number}")
+    def lot_detail(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
+        lot = conn.execute(
+            f"SELECT {LOT_COLUMNS}, attributes, first_file_id, last_file_id FROM lots "
+            "WHERE source = %s AND lot_number = %s", (source, lot_number),
+        ).fetchone()
+        if lot is None:
+            raise HTTPException(404, "lot not found")
+        versions = conn.execute(
+            """SELECT id, valid_from, valid_to, attributes, file_id, superseded_by_file_id
+               FROM lot_versions WHERE source = %s AND lot_number = %s
+               ORDER BY valid_to DESC LIMIT 200""", (source, lot_number),
+        ).fetchall()
+        history, newer = [], lot["attributes"]
+        for v in versions:
+            history.append({
+                "changed_at": v["valid_to"], "file_id": v["superseded_by_file_id"],
+                "changes": diff_attributes(v["attributes"], newer),
+            })
+            newer = v["attributes"]
+        return {"lot": lot, "history": history}
+
+    @api.get("/lots/{source}/{lot_number}/images")
+    def lot_images(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
+        """Photos of a lot. The provider is asked with the URLs stored for the lot -- never
+        with anything the client sends -- and only known image hosts are returned."""
+        lot = conn.execute(
+            """SELECT lot_number, image_url, thumbnail_url FROM lots
+               WHERE source = %s AND lot_number = %s""", (source, lot_number),
+        ).fetchone()
+        if lot is None:
+            raise HTTPException(404, "lot not found")
+        provider = PROVIDERS.get(source)
+        if provider is None or provider.fetch_images is None:
+            return {"images": []}
+        key = (source, lot_number, lot["image_url"], lot["thumbnail_url"])
+        images = image_cache.get(key)
+        if images is None:
+            images = [asdict(i) for i in provider.fetch_images(lot)]
+            image_cache.put(key, images)
+        return {"images": images}
+
+    # --- live events -----------------------------------------------------------------------------
+    @api.get("/events")
+    async def events(request: Request) -> StreamingResponse:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
+        broker.subscribers.add(queue)
+
+        async def stream() -> AsyncIterator[str]:
+            try:
+                yield "retry: 3000\n\n"
+                while not await request.is_disconnected():
+                    try:
+                        payload = await asyncio.wait_for(queue.get(), timeout=15)
+                        yield f"data: {payload}\n\n"
+                    except TimeoutError:
+                        yield ": keep-alive\n\n"
+            finally:
+                broker.subscribers.discard(queue)
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
+
+    app.include_router(public)
+    app.include_router(api)
+    return app
+
+
+def diff_attributes(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
+    """Field-level changes between two versions of a lot's attributes."""
+    return [
+        {"field": k, "old": old.get(k), "new": new.get(k)}
+        for k in sorted(old.keys() | new.keys())
+        if old.get(k) != new.get(k)
+    ]
+
+
+def app_factory() -> FastAPI:  # uvicorn --factory entrypoint
+    return create_app()

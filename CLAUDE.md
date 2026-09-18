@@ -1,29 +1,117 @@
 # Cars Secrets Data Ingest
 
-
+Continuous ingestion of vehicle-auction CSV exports into PostgreSQL, with a React dashboard
+for monitoring and alerts. Copart is the first provider; others (IAAI, …) plug in without a
+migration. A downloader (out of scope) saves an export into `data/inbox/<provider>/` about
+every hour; saving the file triggers ingestion.
 
 ## Tech stack
 
+- **Backend** (`backend/`): Python 3.12, psycopg 3 (`COPY` for bulk loads), FastAPI + uvicorn,
+  watchdog (file events), pydantic-settings, Alembic, structlog. Package: `ingest`.
+- **Database**: PostgreSQL 17.
+- **Frontend** (`frontend/`): React 19 + TypeScript, Vite, TanStack Query, React Router,
+  Recharts. Served by nginx, which also proxies `/api`.
+- **Runtime**: Docker Compose — `db`, `migrate` (one-shot), `worker`, `api`, `web`.
+- **Tests**: pytest + testcontainers (real Postgres), Vitest + Testing Library.
 
 ## Commands
 
+```bash
+./start.sh                      # build + start everything; creates .env with secrets on first run
+./start.sh --logs               # same, then follow worker/api logs
+docker compose down             # stop (add -v to also drop the database)
+python3 scripts/simulate_export.py   # drop a realistic "next hour" export into the inbox
+
+# backend (from backend/)
+uv sync                         # create .venv with dev dependencies
+.venv/bin/pytest                # all tests; starts a throwaway Postgres via Docker
+TEST_DATABASE_URL=postgresql://… .venv/bin/pytest   # reuse an existing Postgres (it is wiped)
+.venv/bin/ruff check ingest tests migrations
+
+# frontend (from frontend/)
+npm ci
+npm test                        # vitest
+npm run typecheck
+npm run build
+npm run dev                     # dev server on :5173, proxies /api to localhost:8000
+```
 
 ## Architecture rules (important)
 
-
+- **Flow**: `worker` watches `inbox/<provider>/` (filesystem events + a 30 s rescan safety
+  net), waits until the file stops changing, then `pipeline.process_file` registers it in
+  `ingest_files`, skips byte-identical files (sha256), and `loader.load_file` loads it in
+  **one transaction**: COPY into a temp `stage` table → change detection → `lot_versions`
+  snapshot → upsert `lots` → removals → column registry. Success archives the file gzipped;
+  failure moves it to `failed/` and raises a critical alert. Never split the load across
+  transactions: a lot must never be half-updated.
+- **Provider-neutral schema**: `lots` has typed canonical columns (`schema.CANONICAL_COLUMNS`,
+  must match the migration — a test enforces it) keyed by `(source, lot_number)`, plus
+  `attributes` JSONB holding every source column. Provider specifics live only in
+  `ingest/providers/<name>.py` (header aliases, key parsing, derived columns, ignored and
+  volatile columns, removal scope). Adding a provider = new module + registry entry, no
+  migration. Adding a canonical column = migration + `schema.py` + mappings.
+- **Schema drift never fails a file**: unknown columns go to `attributes` and the registry
+  with a warning; a missing mapped column becomes NULL with a warning. Only a missing lot
+  key rejects the file. Renamed headers are handled by adding an alias to the provider.
+- **Change detection**: row hash over canonicalized, non-volatile attributes (`Id` is
+  ignored, `Create Date/Time` is volatile, `8119.0` == `8119`). If the column set changed
+  since the last file, only columns present in both files are compared, so drift never marks
+  every lot as updated. Only real changes write `lot_versions` (full history).
+- **Removals are scoped and wait for the auction**: Copart downloads can be a subset of
+  yards, so a lot missing from a file is marked removed only if its yard
+  (`Provider.removal_scope`) is in the file **and** the file holds ≥ 50 % of that yard's
+  active lots (otherwise the yard is skipped + info alert), **and** its `sale_at` +
+  `REMOVAL_GRACE_MINUTES` (120) has passed — bidding ends after the sale opens. Deferred lots
+  stay active and are removed by the first later file that still lacks them. Lots without a
+  sale time have no pending auction and are removed immediately.
+- **Lot photos**: `Provider.fetch_images` lists photos on demand (API
+  `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
+  only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
+  `cs.copart.com` for images, which the CSP `img-src` allows). Browsers load images directly.
+- **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
+  unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
+  that can clear (worker down, no new file, missing column) are auto-resolved. The API
+  process runs the periodic checks, so a dead worker is still reported.
+- **Live dashboard**: every state change calls `db.notify` (`pg_notify`) inside the same
+  transaction; the API LISTENs and fans out over SSE (`/api/events`); the UI invalidates
+  queries per event type (`frontend/src/lib/events.ts`).
+- Timestamps that measure work use `clock_timestamp()`, not `now()` (transaction start).
 
 ## Security rules
 
-
+- Never commit `.env`, real exports under `data/`, or database dumps. `.env` is generated by
+  `start.sh` with random secrets and mode 600.
+- Every `/api` route except `/api/health` and `/api/auth/login` requires the session cookie
+  (signed with `SESSION_SECRET`, http-only, `SameSite=Strict`). New routes go on the
+  authenticated router in `api/app.py`, never on `public`.
+- The API refuses to start without `DASHBOARD_PASSWORD` or with a `SESSION_SECRET` under 32
+  characters. Credentials are compared in constant time; failed logins are rate-limited per
+  client IP (nginx overwrites `X-Forwarded-For`, so it cannot be spoofed).
+- SQL is always parameterized. The only f-string SQL interpolates code constants (column
+  lists, the change predicate) — never request or file data.
+- File operations from the API stay inside configured directories (`retry` checks the path
+  is under `FAILED_DIR`). CSV content is data: in the UI render it as text, never HTML.
+- Ports bind to `127.0.0.1` only. Set `COOKIE_SECURE=true` when serving over HTTPS.
 
 ## Migrations
 
+- Alembic, raw SQL via `op.execute`, in `backend/migrations/versions/NNNN_description.py`.
+  Migrations must not import application code (they are frozen history).
+- Applied automatically by the `migrate` service before `worker`/`api` start, or manually:
+  `cd backend && DATABASE_URL=… .venv/bin/alembic upgrade head`.
+- Never edit a migration that has run anywhere shared; add a new one. Large backfills (e.g.
+  promoting an `attributes` key to a typed column) go in batches.
 
 ## Tests
 
 Always add tests when adding or changing behaviour. Tests run against a real
 Postgres, not SQLite — the schema uses partial unique indexes and `now()`
 semantics that SQLite does not share.
+
+`backend/tests/fixtures/sample.csv` holds 300 real Copart rows plus 2 malformed (shifted)
+rows; build variations with `make_export` in `conftest.py` rather than adding fixtures.
 
 ## Unit Test Requirements
 
@@ -81,7 +169,16 @@ A code change is not considered complete until the relevant unit tests have been
 
 ## Current state
 
-
+- Working end to end: watcher → ingest → Postgres, change history, schema-drift handling,
+  yard-scoped removals deferred until the auction is over, alerts (dashboard only, no
+  email/Slack by decision), dashboard with login, live updates, run retry, lot explorer with
+  photos. One provider: Copart.
+- Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
+- Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
+  rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
+  when download size changes; tune `ROW_COUNT_DEVIATION_RATIO` if it is noisy.
+- Single worker by design (per-provider advisory lock makes a second one safe but idle).
+- Not done yet: downloader, external alert channels, a second provider.
 
 ## Branching
 

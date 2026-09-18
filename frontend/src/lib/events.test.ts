@@ -1,0 +1,15 @@
+import { queriesFor } from "./events";
+
+describe("queriesFor", () => {
+  it("refreshes run data when a run finishes", () => {
+    const keys = queriesFor({ type: "run_finished" }).map((k) => k[0]);
+    expect(keys).toEqual(expect.arrayContaining(["overview", "runs", "lots", "schema"]));
+  });
+
+  it("refreshes alerts and the overview on alert events", () => {
+    for (const type of ["alert", "alert_resolved", "alert_updated"] as const) {
+      const keys = queriesFor({ type }).map((k) => k[0]);
+      expect(keys).toEqual(expect.arrayContaining(["overview", "alerts"]));
+    }
+  });
+});

@@ -1,0 +1,161 @@
+"""Copart "sales data" CSV export (www.copart.com/downloadSalesData)."""
+
+from __future__ import annotations
+
+import json
+import urllib.request
+from collections.abc import Callable, Mapping
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+import structlog
+
+from ..converters import (
+    ConversionError,
+    local_timestamp,
+    to_db2_timestamp,
+    to_decimal,
+    to_https_url,
+    to_int,
+    to_iso_utc,
+    to_text,
+    to_yyyymmdd,
+)
+from .base import FieldMapping, LotImage, Provider, RawGetter
+
+log = structlog.get_logger()
+
+
+def _lot_number(raw: str) -> str | None:
+    try:
+        number = to_int(raw)
+    except ConversionError:
+        return None
+    return str(number) if number is not None and number > 0 else None
+
+
+def _f(column: str, convert: Any, *aliases: str) -> FieldMapping:
+    return FieldMapping(column, aliases or (column,), convert)
+
+
+_SALE_TIME = ("sale_time_hhmm", "sale_time")
+_TIME_ZONE = ("time_zone",)
+
+
+def _derive(raw: RawGetter, values: dict[str, Any]) -> None:
+    values["sale_at"] = local_timestamp(values.get("sale_date"), raw(_SALE_TIME), raw(_TIME_ZONE))
+
+
+# The lot's `image_url` points at Copart's image API, which lists every photo of the lot.
+# Only these hosts are ever contacted or embedded, whatever the export contains.
+IMAGE_API_HOST = "inventoryv2.copart.io"
+IMAGE_HOST = "cs.copart.com"
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+def _get_json(url: str) -> Any:
+    request = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   "User-Agent": "cars-ingest/1.0"})
+    with urllib.request.urlopen(request, timeout=8) as response:  # noqa: S310 - https, fixed host
+        return json.loads(response.read(_MAX_RESPONSE_BYTES))
+
+
+def _image_url(raw: Any) -> str | None:
+    """HTTPS URL on Copart's image host, or None."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        url = to_https_url(raw)
+    except ConversionError:
+        return None
+    return url if url and urlsplit(url).hostname == IMAGE_HOST else None
+
+
+def images(lot: Mapping[str, Any], get_json: Callable[[str], Any] = _get_json) -> list[LotImage]:
+    """All photos from Copart's image API; falls back to the export's thumbnail
+    (full size = same name with `_ful` instead of `_thb`) if the API is unreachable."""
+    found: list[LotImage] = []
+    api = urlsplit((lot.get("image_url") or "").strip())
+    if api.hostname == IMAGE_API_HOST and api.path.startswith("/v1/lotImages/"):
+        try:
+            data = get_json(urlunsplit(("https", api.netloc, api.path, api.query, "")))
+            entries = sorted(data.get("lotImages") or [], key=lambda e: e.get("sequence") or 0)
+            for entry in entries:
+                sizes: dict[str, str | None] = {"thumb": None, "full": None, "hd": None}
+                for link in entry.get("link") or []:
+                    url = _image_url(link.get("url"))
+                    if url is None or link.get("isEngineSound"):
+                        continue
+                    kind = ("thumb" if link.get("isThumbNail")
+                            else "hd" if link.get("isHdImage") else "full")
+                    sizes[kind] = sizes[kind] or url
+                if sizes["thumb"] or sizes["full"] or sizes["hd"]:
+                    found.append(LotImage(**sizes))
+        except Exception:  # noqa: BLE001 - photos are best effort, never an API error
+            log.warning("images.fetch_failed", lot=lot.get("lot_number"), exc_info=True)
+    if not found:
+        thumb = _image_url(lot.get("thumbnail_url"))
+        if thumb:
+            full = thumb.replace("_thb.", "_ful.") if "_thb." in thumb else None
+            found.append(LotImage(thumb=thumb, full=full))
+    return found
+
+
+COPART = Provider(
+    name="copart",
+    display_name="Copart",
+    key_aliases=("lot_number",),
+    key_convert=_lot_number,
+    ignored_columns=frozenset({"id"}),  # row counter of the export, changes every file
+    # Stamped with the export batch time on every row, so it differs in each download.
+    volatile_columns=frozenset({"create_date_time"}),
+    fields=(
+        _f("yard_code", to_text, "yard_number"),
+        _f("yard_name", to_text),
+        _f("sale_date", to_yyyymmdd, "sale_date_m_d_cy", "sale_date"),
+        _f("vehicle_type", to_text),
+        _f("year", to_int),
+        _f("make", to_text),
+        _f("model_group", to_text),
+        _f("model_detail", to_text),
+        _f("trim", to_text),
+        _f("body_style", to_text),
+        _f("color", to_text),
+        _f("damage_primary", to_text, "damage_description"),
+        _f("damage_secondary", to_text, "secondary_damage"),
+        _f("title_state", to_text, "sale_title_state"),
+        _f("title_type", to_text, "sale_title_type"),
+        _f("has_keys", to_text, "has_keys_yes_or_no", "has_keys"),
+        _f("vin", to_text),
+        _f("odometer", to_decimal),
+        _f("odometer_brand", to_text),
+        _f("est_retail_value", to_decimal),
+        _f("repair_cost", to_decimal),
+        _f("engine", to_text),
+        _f("drive", to_text),
+        _f("transmission", to_text),
+        _f("fuel_type", to_text),
+        _f("cylinders", to_text),
+        _f("runs_drives", to_text),
+        _f("sale_status", to_text),
+        _f("high_bid", to_decimal, "high_bid_non_vix_sealed_vix", "high_bid"),
+        _f("buy_it_now_price", to_decimal),
+        _f("currency", to_text, "currency_code"),
+        _f("location_city", to_text),
+        _f("location_state", to_text),
+        _f("location_zip", to_text),
+        _f("location_country", to_text),
+        _f("seller_name", to_text),
+        _f("image_url", to_text),
+        _f("thumbnail_url", to_https_url, "image_thumbnail"),
+        _f("source_created_at", to_db2_timestamp, "create_date_time"),
+        _f("source_updated_at", to_iso_utc, "last_updated_time"),
+    ),
+    derive=_derive,
+    derived_sources={alias: "sale_at" for alias in _SALE_TIME + _TIME_ZONE},
+    # Downloads can be a subset of yards (seen: 44 of 224), so absence only means removal
+    # for lots of a yard the export contains.
+    removal_scope="yard_code",
+    removal_scope_label="yard",
+    fetch_images=images,
+)
