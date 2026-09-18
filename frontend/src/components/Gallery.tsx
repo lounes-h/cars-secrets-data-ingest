@@ -3,9 +3,31 @@ import type { LotImage } from "../lib/api";
 
 /** Main photo with previous/next and a strip of thumbnails. Photos load straight from the
  * provider's image host (allowed by the CSP); no referrer is sent. */
-export function Gallery({ images, alt }: { images: LotImage[]; alt: string }) {
+export function Gallery({ images, alt, complete = true, moreUrl }: {
+  images: LotImage[];
+  alt: string;
+  /** False when the provider's photo list was unavailable and only the export's thumbnail is shown. */
+  complete?: boolean;
+  /** The lot's page on the auction site, offered when photos are missing. */
+  moreUrl?: string | null;
+}) {
   const [index, setIndex] = useState(0);
-  if (images.length === 0) return <div className="gallery-empty muted">No photos for this lot.</div>;
+  const more = !complete && moreUrl ? (
+    <div className="gallery-more small">
+      <span className="muted">
+        {images.length ? "Only this photo is available here." : "No photos available here."}
+      </span>{" "}
+      <a href={moreUrl} target="_blank" rel="noopener noreferrer">See all photos on the auction site ↗</a>
+    </div>
+  ) : null;
+  if (images.length === 0) {
+    return (
+      <div className="gallery">
+        <div className="gallery-empty muted">No photos for this lot.</div>
+        {more}
+      </div>
+    );
+  }
 
   const i = Math.min(index, images.length - 1);
   const current = images[i];
@@ -40,6 +62,7 @@ export function Gallery({ images, alt }: { images: LotImage[]; alt: string }) {
           ))}
         </div>
       )}
+      {more}
     </div>
   );
 }

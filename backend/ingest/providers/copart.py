@@ -6,7 +6,7 @@ import json
 import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import structlog
 
@@ -21,7 +21,7 @@ from ..converters import (
     to_text,
     to_yyyymmdd,
 )
-from .base import FieldMapping, LotImage, Provider, RawGetter
+from .base import FieldMapping, LotImage, LotImages, Provider, RawGetter
 
 log = structlog.get_logger()
 
@@ -71,9 +71,11 @@ def _image_url(raw: Any) -> str | None:
     return url if url and urlsplit(url).hostname == IMAGE_HOST else None
 
 
-def images(lot: Mapping[str, Any], get_json: Callable[[str], Any] = _get_json) -> list[LotImage]:
-    """All photos from Copart's image API; falls back to the export's thumbnail
-    (full size = same name with `_ful` instead of `_thb`) if the API is unreachable."""
+def images(lot: Mapping[str, Any], get_json: Callable[[str], Any] = _get_json) -> LotImages:
+    """All photos from Copart's public image API. For some lots (seen: about 1 in 6-12, those
+    on Copart's newer image store) the API answers 404 although copart.com shows photos; then
+    only the export's thumbnail is available (full size = `_thb` -> `_ful`), marked incomplete
+    so the UI can link to the lot page. Copart's member-only endpoints are never called."""
     found: list[LotImage] = []
     api = urlsplit((lot.get("image_url") or "").strip())
     if api.hostname == IMAGE_API_HOST and api.path.startswith("/v1/lotImages/"):
@@ -93,12 +95,17 @@ def images(lot: Mapping[str, Any], get_json: Callable[[str], Any] = _get_json) -
                     found.append(LotImage(**sizes))
         except Exception:  # noqa: BLE001 - photos are best effort, never an API error
             log.warning("images.fetch_failed", lot=lot.get("lot_number"), exc_info=True)
-    if not found:
-        thumb = _image_url(lot.get("thumbnail_url"))
-        if thumb:
-            full = thumb.replace("_thb.", "_ful.") if "_thb." in thumb else None
-            found.append(LotImage(thumb=thumb, full=full))
-    return found
+    if found:
+        return LotImages(found, complete=True)
+    thumb = _image_url(lot.get("thumbnail_url"))
+    if thumb:
+        full = thumb.replace("_thb.", "_ful.") if "_thb." in thumb else None
+        found.append(LotImage(thumb=thumb, full=full))
+    return LotImages(found, complete=False)
+
+
+def listing_url(lot_number: str) -> str:
+    return f"https://www.copart.com/lot/{quote(lot_number, safe='')}"
 
 
 COPART = Provider(
@@ -158,4 +165,5 @@ COPART = Provider(
     removal_scope="yard_code",
     removal_scope_label="yard",
     fetch_images=images,
+    listing_url=listing_url,
 )

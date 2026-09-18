@@ -20,6 +20,15 @@ class LotImage:
 
 
 @dataclass(frozen=True)
+class LotImages:
+    """A lot's photos. `complete` is False when the provider's photo list was unavailable and
+    only what the export carries (e.g. one thumbnail) could be shown."""
+
+    images: list[LotImage]
+    complete: bool
+
+
+@dataclass(frozen=True)
 class FieldMapping:
     """One canonical column fed by the first matching (normalized) source header."""
 
@@ -61,7 +70,9 @@ class Provider:
     removal_scope_label: str = "scope"
     # Lists a lot's photos from its stored columns (`image_url`, `thumbnail_url`, …). Called by
     # the API on demand; may do network I/O and must never raise.
-    fetch_images: Callable[[Mapping[str, Any]], list[LotImage]] | None = None
+    fetch_images: Callable[[Mapping[str, Any]], LotImages] | None = None
+    # The lot's page on the provider's site: where dealers see everything and go to bid.
+    listing_url: Callable[[str], str] | None = None
 
     def __post_init__(self) -> None:
         if self.removal_scope is not None and self.removal_scope not in COLUMN_INDEX:

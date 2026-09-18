@@ -383,6 +383,9 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
                 "changes": diff_attributes(v["attributes"], newer),
             })
             newer = v["attributes"]
+        provider = PROVIDERS.get(source)
+        lot["listing_url"] = (provider.listing_url(lot_number)
+                              if provider and provider.listing_url else None)
         return {"lot": lot, "history": history}
 
     @api.get("/lots/{source}/{lot_number}/images")
@@ -397,13 +400,13 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
             raise HTTPException(404, "lot not found")
         provider = PROVIDERS.get(source)
         if provider is None or provider.fetch_images is None:
-            return {"images": []}
+            return {"images": [], "complete": False}
         key = (source, lot_number, lot["image_url"], lot["thumbnail_url"])
-        images = image_cache.get(key)
-        if images is None:
-            images = [asdict(i) for i in provider.fetch_images(lot)]
-            image_cache.put(key, images)
-        return {"images": images}
+        result = image_cache.get(key)
+        if result is None:
+            result = asdict(provider.fetch_images(lot))
+            image_cache.put(key, result)
+        return result
 
     # --- live events -----------------------------------------------------------------------------
     @api.get("/events")

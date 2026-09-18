@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from ingest.api.app import TTLCache, create_app, diff_attributes
 from ingest.pipeline import process_file
-from ingest.providers import COPART, PROVIDERS, LotImage
+from ingest.providers import COPART, PROVIDERS, LotImage, LotImages
 
 from .conftest import read_sample
 
@@ -84,6 +84,7 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
     assert authed.get("/api/lots", params={"q": "%"}).json()["items"] == []  # LIKE escaped
 
     lot = authed.get(f"/api/lots/copart/{lot_number}").json()
+    assert lot["lot"]["listing_url"] == f"https://www.copart.com/lot/{lot_number}"
     (change,) = lot["history"]
     assert {"field": "high_bid_non_vix_sealed_vix", "old": "0", "new": "4242"} in change["changes"]
     assert authed.get("/api/lots/copart/0").status_code == 404
@@ -146,15 +147,16 @@ def test_lot_images_are_fetched_once_and_cached(authed, conn, settings, make_exp
 
     def fake_fetch(lot):
         seen.append(dict(lot))
-        return [LotImage(thumb="https://cs.copart.com/a_thb.jpg",
-                         full="https://cs.copart.com/a_ful.jpg")]
+        return LotImages([LotImage(thumb="https://cs.copart.com/a_thb.jpg",
+                                   full="https://cs.copart.com/a_ful.jpg")], complete=False)
 
     monkeypatch.setitem(PROVIDERS, "copart", dataclasses.replace(COPART, fetch_images=fake_fetch))
     lot_number = rows[0][header.index("Lot number")]
     for _ in range(2):
         body = authed.get(f"/api/lots/copart/{lot_number}/images").json()
         assert body == {"images": [{"thumb": "https://cs.copart.com/a_thb.jpg",
-                                    "full": "https://cs.copart.com/a_ful.jpg", "hd": None}]}
+                                    "full": "https://cs.copart.com/a_ful.jpg", "hd": None}],
+                        "complete": False}
     assert len(seen) == 1
     # the provider only ever gets the URLs stored for the lot
     assert seen[0]["image_url"].startswith("http://inventoryv2.copart.io/v1/lotImages/")

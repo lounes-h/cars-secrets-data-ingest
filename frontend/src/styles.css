@@ -247,3 +247,10 @@ pre { background: var(--surface-2); padding: 8px 10px; border-radius: 8px; overf
 .gallery-empty { aspect-ratio: 4 / 3; display: grid; place-items: center; background: var(--surface-2); border-radius: 8px; }
 .lot-thumb { width: 64px; height: 48px; object-fit: cover; border-radius: 4px; display: block; background: var(--surface-2); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.gallery-more { margin-top: 2px; }
+.lot-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.button-link {
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; font-weight: 500;
+  background: var(--surface); color: var(--ink);
+}
+.button-link:hover { background: var(--surface-2); text-decoration: none; }
