@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     # Alert thresholds
     stale_after_minutes: int = 75  # Copart export is downloaded hourly
     heartbeat_timeout_seconds: int = 120
+    # The downloader heartbeats every 30 s; after this long without one it counts as stopped.
+    downloader_timeout_seconds: int = 150
     rejected_warning_ratio: float = 0.01
     rejected_critical_ratio: float = 0.10
     row_count_deviation_ratio: float = 0.30

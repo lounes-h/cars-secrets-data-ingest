@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { NextDownload } from "../components/NextDownload";
 import { useToast } from "../components/Toasts";
 import { Pager, QueryState, RunStatusBadge, Segmented, SeverityBadge } from "../components/ui";
 import { api, type RunStatus } from "../lib/api";
@@ -21,6 +22,7 @@ export function RunsPage() {
   return (
     <div>
       <div className="topbar"><h1>Runs</h1></div>
+      <NextDownload />
       <div className="filters">
         <Segmented<StatusFilter> label="Status" value={status}
           onChange={(v) => { setStatus(v); setOffset(0); }}

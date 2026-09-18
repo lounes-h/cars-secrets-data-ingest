@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Literal
 
 from psycopg import Connection
 
@@ -13,6 +14,41 @@ from .alerts import AlertSpec, raise_alert, resolve_fingerprint
 from .config import Settings
 
 WORKER_DOWN = "worker_down"
+DOWNLOADER_DOWN = "downloader_down:copart"
+
+DownloaderStatus = Literal[
+    "not_installed", "paused", "not_running", "downloading", "requested", "scheduled"]
+
+
+def downloader_status(row: dict[str, Any] | None, now: datetime, timeout_s: int
+                      ) -> DownloaderStatus:
+    """What the host-side downloader is doing, from the row it publishes."""
+    if row is None:
+        return "not_installed"
+    if row.get("needs_attention"):
+        return "paused"
+    beat = row.get("heartbeat_at")
+    if beat is None or now - beat > timedelta(seconds=timeout_s):
+        return "not_running"
+    if row.get("activity") == "downloading":
+        return "downloading"
+    if row.get("run_requested_at"):
+        return "requested"
+    return "scheduled"
+
+
+def check_downloader(row: dict[str, Any] | None, now: datetime, timeout_s: int) -> Finding:
+    """Alert when an installed downloader stops running (its own pause alert covers logins)."""
+    if row is None or downloader_status(row, now, timeout_s) != "not_running":
+        return Finding(DOWNLOADER_DOWN, None, "copart")
+    beat = row.get("heartbeat_at")
+    since = f"since {beat:%H:%M} UTC" if beat else "(never started)"
+    return Finding(DOWNLOADER_DOWN, AlertSpec(
+        "critical", "downloader_down", f"Copart downloader is not running {since}",
+        DOWNLOADER_DOWN,
+        {"last_heartbeat_at": beat.isoformat() if beat else None,
+         "fix": "launchd restarts it automatically; if not: ./scripts/install_downloader.sh"},
+    ), "copart")
 
 
 @dataclass(frozen=True)
@@ -56,7 +92,10 @@ def check_staleness(
     ), source)
 
 
-def run_checks(conn: Connection, settings: Settings) -> list[Finding]:
+def run_checks(conn: Connection, settings: Settings, *, after_sleep: bool = False
+               ) -> list[Finding]:
+    """`after_sleep`: the machine just woke up, so heartbeats are stale for reasons that fix
+    themselves within seconds; this round only resolves heartbeat alerts, never raises them."""
     row = conn.execute(
         """SELECT now() AS now, hb.last_beat_at AS last_beat, hb.started_at AS started
            FROM (SELECT 1) one
@@ -79,7 +118,14 @@ def run_checks(conn: Connection, settings: Settings) -> list[Finding]:
             source, last.get(source), worker_started, now, settings.stale_after_minutes
         ))
 
+    status_row = conn.execute(
+        "SELECT * FROM downloader_status WHERE source = 'copart'").fetchone()
+    findings.append(check_downloader(status_row, now, settings.downloader_timeout_seconds))
+
+    heartbeat_based = {WORKER_DOWN, DOWNLOADER_DOWN}
     for f in findings:
+        if f.spec is not None and after_sleep and f.fingerprint in heartbeat_based:
+            continue
         if f.spec is None:
             resolve_fingerprint(conn, f.fingerprint)
         else:

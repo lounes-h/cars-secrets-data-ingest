@@ -78,6 +78,7 @@ export interface Overview {
   } | null;
   providers: ProviderStatus[];
   lots: { active: number; removed: number; new_24h: number; removed_24h: number; changed_24h: number };
+  downloader: Downloader;
   alerts_open: Record<Severity, number>;
   now: string;
 }
@@ -145,6 +146,24 @@ export interface LotImage {
   hd: string | null;
 }
 
+export type DownloaderStatus =
+  | "not_installed" | "paused" | "not_running" | "downloading" | "requested" | "scheduled";
+
+export interface Downloader {
+  installed: boolean;
+  status: DownloaderStatus;
+  /** Server clock when computed: the countdown corrects for a skewed browser clock with it. */
+  now?: string;
+  heartbeat_at?: string | null;
+  daemon_started_at?: string | null;
+  next_run_at?: string | null;
+  last_success_at?: string | null;
+  last_attempt_at?: string | null;
+  consecutive_failures?: number;
+  needs_attention?: string | null;
+  run_requested_at?: string | null;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -189,6 +208,8 @@ export const api = {
     request<{ username: string }>("POST", "/api/auth/login", { username, password }),
   logout: () => request<void>("POST", "/api/auth/logout"),
   overview: () => request<Overview>("GET", "/api/overview"),
+  downloader: () => request<Downloader>("GET", "/api/downloader"),
+  downloadNow: () => request<Downloader>("POST", "/api/downloader/run"),
   runs: (params?: Params) =>
     request<{ items: Run[]; total: number }>("GET", withParams("/api/runs", params)),
   run: (id: number) => request<RunDetail>("GET", `/api/runs/${id}`),

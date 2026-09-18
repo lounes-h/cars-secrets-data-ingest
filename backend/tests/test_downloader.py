@@ -272,3 +272,62 @@ def test_window_closed_mid_download_gets_a_clear_alert(dsettings, conn):
 
     assert cli.run_once(dsettings, now=Clock(), fetch=closed) == cli.FAILED
     assert "window was closed" in open_alerts(conn)[cli.FP_FAILED]["title"]
+
+
+def test_status_is_published_for_the_dashboard(dsettings, conn):
+    cli.run_once(dsettings, now=Clock(T0), fetch=fetch_returning(PageState.READY, SAMPLE))
+    row = conn.execute("SELECT * FROM downloader_status").fetchone()
+    assert row["last_success_at"] == T0
+    assert row["next_allowed_at"] == T0 + timedelta(minutes=45)
+    assert row["heartbeat_at"] is None  # only the always-on process sends heartbeats
+
+    state = State.load(dsettings.state_file)
+    state.next_run_at = (T0 + timedelta(hours=1)).isoformat()
+    cli.save(dsettings, state, heartbeat=True, started_at=T0)
+    row = conn.execute("SELECT * FROM downloader_status").fetchone()
+    assert row["heartbeat_at"] is not None and row["daemon_started_at"] == T0
+    assert row["next_run_at"] == T0 + timedelta(hours=1)
+
+    cli.save(dsettings, state)  # a CLI save keeps the heartbeat...
+    assert conn.execute("SELECT heartbeat_at FROM downloader_status").fetchone()["heartbeat_at"]
+    cli.save(dsettings, state, stopped=True)  # ...a clean stop clears it at once
+    assert conn.execute("SELECT heartbeat_at FROM downloader_status").fetchone()[
+        "heartbeat_at"] is None
+
+
+def test_download_now_request_round_trip(dsettings, conn):
+    cli.save(dsettings, State())
+    assert cli.read_request(dsettings) is None
+    conn.execute("UPDATE downloader_status SET run_requested_at = now()")
+    at = cli.read_request(dsettings)
+    assert at is not None
+    cli.clear_request(dsettings, at)
+    assert cli.read_request(dsettings) is None
+
+
+def test_only_one_process_uses_the_chrome_profile(dsettings, conn):
+    from ingest.downloader.core import download_lock
+
+    with download_lock(dsettings.lock_file) as first:
+        assert first
+        with download_lock(dsettings.lock_file) as second:
+            assert not second
+        fetch = fetch_returning(PageState.READY, SAMPLE)
+        assert cli.run_locked(dsettings, force=True, fetch=fetch) == cli.BUSY
+        assert fetch.calls == []  # Chrome never started
+    assert cli.run_locked(dsettings, force=True, now=Clock(),
+                          fetch=fetch_returning(PageState.READY, SAMPLE)) == cli.OK
+
+
+def test_state_file_from_an_older_version_still_loads(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text('{"consecutive_failures": 2, "last_invocation_at": "x", '
+                    '"schedule_interval_seconds": 3600}')
+    assert State.load(path).consecutive_failures == 2
+
+
+def test_pause_is_published(dsettings, conn):
+    cli.run_once(dsettings, now=Clock(), fetch=fetch_returning(PageState.LOGIN_REQUIRED))
+    row = conn.execute("SELECT needs_attention, next_allowed_at FROM downloader_status"
+                       ).fetchone()
+    assert row == {"needs_attention": "login_required", "next_allowed_at": None}

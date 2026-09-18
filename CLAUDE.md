@@ -22,8 +22,8 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 ./start.sh --logs               # same, then follow worker/api logs
 docker compose down             # stop (add -v to also drop the database)
 python3 scripts/simulate_export.py   # drop a realistic "next hour" export into the inbox
-./scripts/install_downloader.sh      # schedule the hourly Copart download (macOS launchd)
-(cd backend && .venv/bin/python -m ingest.downloader login|run --force|status)
+./scripts/install_downloader.sh      # (re)install the always-on Copart downloader; start.sh does it
+(cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
 # backend (from backend/)
 uv sync                         # create .venv with dev dependencies
@@ -90,7 +90,10 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   `login`. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
   HTTP redirects, which bypass routing), so they never reach the real site. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
   code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
-  `.part` rename.
+  `.part` rename. It runs as an always-on process (`daemon.py`, launchd `KeepAlive`, installed
+  or updated by `start.sh`) that plans its own downloads, heartbeats and publishes its state to
+  `downloader_status` (best effort); the dashboard's "Download now" sets `run_requested_at`,
+  which it picks up within seconds. A file lock keeps one Chrome per profile.
 
 ## Security rules
 

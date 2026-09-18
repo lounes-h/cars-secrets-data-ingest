@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import os
 import random
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -36,6 +38,7 @@ class DownloaderSettings(BaseSettings):
     failed_dir: Path = REPO_ROOT / "data" / "failed" / "downloader"
     profile_dir: Path = HOME_DIR / "copart-profile"
     state_file: Path = HOME_DIR / "downloader-state.json"
+    lock_file: Path = HOME_DIR / "downloader.lock"
 
     # A visible browser window, like a person using the site; set false to run headless.
     copart_headed: bool = True
@@ -135,19 +138,47 @@ class State:
     consecutive_failures: int = 0
     # Set when Copart shows a login page or a challenge; cleared only by `login`.
     needs_attention: str | None = None
+    # The always-on process (daemon.py): when its last hourly cycle started, when it plans
+    # the next download, and what it is doing now ('idle' | 'downloading').
+    last_cycle_at: str | None = None
+    next_run_at: str | None = None
+    activity: str = "idle"
 
     @classmethod
     def load(cls, path: Path) -> State:
         try:
-            return cls(**json.loads(path.read_text()))
-        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
             return cls()
+        if not isinstance(data, dict):
+            return cls()
+        known = {f.name for f in fields(cls)}  # older/newer versions may have other keys
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2))
         os.replace(tmp, path)
+
+
+@contextmanager
+def download_lock(path: Path) -> Iterator[bool]:
+    """One Chrome per profile: yields False (without waiting) when another process -- the
+    always-on downloader, a manual `run` or `login` -- is using it."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(path, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _parse(ts: str | None) -> datetime | None:
