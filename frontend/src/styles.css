@@ -101,6 +101,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
 .main { padding: 24px 28px 48px; min-width: 0; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .topbar h1 { margin: 0; }
+.back-link { justify-self: start; font-size: 0.9em; }
 
 @media (max-width: 800px) {
   .shell { grid-template-columns: 1fr; }
