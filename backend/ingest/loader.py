@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from psycopg import Connection
@@ -36,6 +37,7 @@ class LoadResult:
     rows_updated: int = 0
     rows_unchanged: int = 0
     rows_rejected: int = 0
+    rows_repaired: int = 0
     rows_removed: int = 0
     rows_removal_deferred: int = 0
     removal_skipped: list[str] = field(default_factory=list)
@@ -111,6 +113,7 @@ def load_file(
         for d in duplicates
     ]
     result.rows_rejected = stats.rows_rejected + len(duplicates)
+    result.rows_repaired = stats.rows_repaired
 
     counts = conn.execute(
         f"""SELECT count(*) FILTER (WHERE l.lot_number IS NULL)           AS new,
@@ -154,7 +157,7 @@ def load_file(
 
     result.rows_removed, result.rows_removal_deferred, result.removal_skipped = _mark_removed(
         conn, source, csv_file.provider.removal_scope, settings.removal_min_ratio,
-        settings.removal_grace_minutes,
+        settings.removal_grace_minutes, sorted(csv_file.stats.unreadable_lots),
     )
 
     _update_registry(conn, file_id, csv_file, registry, result)
@@ -165,7 +168,7 @@ def load_file(
 
 def _mark_removed(
     conn: Connection, source: str, scope_column: str | None, min_ratio: float,
-    grace_minutes: int,
+    grace_minutes: int, unreadable: Sequence[str] = (),
 ) -> tuple[int, int, list[str]]:
     """Mark lots absent from the export as removed, scope by scope (e.g. per yard).
 
@@ -173,7 +176,8 @@ def _mark_removed(
     of the lots active there; otherwise it looks truncated and is skipped. Within a covered
     scope, a missing lot whose sale is not over yet (sale time + grace) stays active; a later
     export that still lacks it removes it then. Lots without a sale time have no auction
-    pending and are removed right away.
+    pending and are removed right away. Lots whose row is in the export but unreadable
+    (`unreadable`) are not missing and stay as they are.
 
     Returns (lots removed, lots deferred, skipped scopes). Must run after the upsert.
     """
@@ -204,7 +208,8 @@ def _mark_removed(
                 FROM lots l
                 WHERE l.source = %(source)s AND l.removed_at IS NULL
                   AND {lot_scope} = ANY(%(covered)s)
-                  AND NOT EXISTS (SELECT 1 FROM stage s WHERE s.lot_number = l.lot_number)),
+                  AND NOT EXISTS (SELECT 1 FROM stage s WHERE s.lot_number = l.lot_number)
+                  AND l.lot_number <> ALL(%(unreadable)s)),
             removed AS (
                 UPDATE lots l SET removed_at = now()
                 FROM missing m
@@ -212,7 +217,8 @@ def _mark_removed(
                 RETURNING 1)
             SELECT (SELECT count(*) FROM removed)                     AS removed,
                    (SELECT count(*) FROM missing WHERE pending)       AS deferred""",
-        {"source": source, "covered": covered, "grace": grace_minutes},
+        {"source": source, "covered": covered, "grace": grace_minutes,
+         "unreadable": list(unreadable)},
     ).fetchone()
     return counts["removed"], counts["deferred"], skipped
 

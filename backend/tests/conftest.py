@@ -64,6 +64,16 @@ def read_sample() -> tuple[list[str], list[list[str]]]:
     return header, rows
 
 
+def write_copart_csv(path: Path, header: list[str], rows: list[list[str]]) -> Path:
+    """Write rows the way Copart does: every field in quotes, quotes inside values NOT
+    escaped (so `29'9"` becomes `"29'9""`), CRLF line ends."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        for row in [header, *rows]:
+            fh.write(",".join(f'"{v}"' for v in row) + "\r\n")
+    return path
+
+
 def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:

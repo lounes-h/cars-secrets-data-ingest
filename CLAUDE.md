@@ -57,6 +57,10 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
 - **Schema drift never fails a file**: unknown columns go to `attributes` and the registry
   with a warning; a missing mapped column becomes NULL with a warning. Only a missing lot
   key rejects the file. Renamed headers are handled by adding an alias to the provider.
+- **Malformed rows**: Copart does not escape quotes inside values (`29'9"`);
+  `Provider.split_record` re-reads such records Copart's way, kept only when the field count
+  matches. A row with the wrong field count is rejected (never loaded shifted), but its lot
+  is not treated as missing for removals.
 - **Change detection**: row hash over canonicalized, non-volatile attributes (`Id` is
   ignored, `Create Date/Time` is volatile, `8119.0` == `8119`). If the column set changed
   since the last file, only columns present in both files are compared, so drift never marks

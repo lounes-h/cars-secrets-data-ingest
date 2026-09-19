@@ -63,6 +63,10 @@ class Provider:
     derive: Callable[[RawGetter, dict[str, Any]], None] | None = None
     # Normalized source header -> canonical column it feeds through `derive`.
     derived_sources: dict[str, str] = field(default_factory=dict)
+    # Re-reads one CSV record (its raw text) when the provider writes CSV that standard
+    # parsing gets wrong, e.g. unescaped quotes. Returns the fields, or None to keep the
+    # standard parse; the result is used only if it has one field per header column.
+    split_record: Callable[[str], list[str] | None] | None = None
     # A lot missing from an export is marked removed only if the export covers its scope
     # (e.g. its yard). None: every export is a full snapshot of the provider's inventory.
     removal_scope: str | None = None

@@ -131,3 +131,31 @@ def test_copart_images_never_calls_an_unexpected_host():
     assert copart.images({"lot_number": "1"}, get_json).images == []
     assert copart.images({"thumbnail_url": "https://elsewhere.com/a_thb.jpg"},
                          get_json).images == []
+
+
+@pytest.mark.parametrize("record, expected", [
+    # patterns from real exports (values shortened)
+    ('1,"TRANSCEND","M-240ML-SLIDE 29\'9"","TWO TONE",2\r\n',
+     ["1", "TRANSCEND", "M-240ML-SLIDE 29'9\"", "TWO TONE", "2"]),
+    ('"Dry Van 53","DRY VAN 53"","","WHITE"', ["Dry Van 53", 'DRY VAN 53"', "", "WHITE"]),
+    ('"CASCADIA","126" SLEEPER CAB","RED"', ["CASCADIA", '126" SLEEPER CAB', "RED"]),
+    ('0.0,""Lightening struck vehicle"","WILMER"',
+     ["0.0", '"Lightening struck vehicle"', "WILMER"]),
+    ('"title is branded "odometer reading is not required"",""',
+     ['title is branded "odometer reading is not required"', ""]),
+    ('""MINI EXCA",""MINI EXCAVATOR ATTACHMENTS: A",""',
+     ['"MINI EXCA', '"MINI EXCAVATOR ATTACHMENTS: A', ""]),
+    ('"V1 20\'5" X 7\'1"",', ["V1 20'5\" X 7'1\"", ""]),  # trailing empty field
+])
+def test_copart_splits_unescaped_quotes(record, expected):
+    assert copart.split_unescaped_quotes(record) == expected
+
+
+@pytest.mark.parametrize("record", [
+    '1,"A","","",0.0\r\n',  # no quote inside a field: standard parsing is right
+    '1,"TRANSCEND","M-240ML-SLIDE 29\'9"",TWO TONE""",2',  # re-escaped: not Copart's shape
+    '1,A"B,"C"',  # unquoted field holding a quote
+    '"never closed"x',
+])
+def test_copart_leaves_other_records_to_the_csv_parser(record):
+    assert copart.split_unescaped_quotes(record) is None

@@ -6,7 +6,7 @@ from ingest.parsing import CsvFile, FileRejected, row_hash
 from ingest.providers import COPART
 from ingest.schema import COLUMN_INDEX
 
-from .conftest import SAMPLE, read_sample, write_csv
+from .conftest import SAMPLE, read_sample, write_copart_csv, write_csv
 
 
 def test_parses_real_sample_and_rejects_shifted_rows():
@@ -105,3 +105,48 @@ def test_same_lot_formatted_differently_hashes_equal(tmp_path):
     with CsvFile(write_csv(tmp_path / "x.csv", header, [row, other]), COPART) as f:
         first, second = list(f.rows())
     assert first.row_hash == second.row_hash
+
+
+def test_copart_unescaped_quotes_are_read_as_copart_wrote_them(tmp_path):
+    """Copart does not escape quotes inside values. Standard parsing rejected these rows
+    (inch marks right before the closing quote shifted the fields) or silently moved the
+    quote (`126 SLEEPER CAB"`); every one of them must load with its exact value."""
+    header, rows = read_sample()
+    rows = [list(r) for r in rows[:6]]
+    body, color, trim, note = (header.index(c) for c in
+                               ("Body Style", "Color", "Trim", "Special Note"))
+    rows[0][body], rows[0][color] = "M-240ML-SLIDE 29'9\"", "TWO TONE"  # was rejected
+    rows[1][body], rows[1][color] = 'DRY VAN 53"', ""  # was rejected (two fields lost)
+    rows[2][trim] = '126" SLEEPER CAB'  # was stored as '126 SLEEPER CAB"'
+    rows[3][note] = 'title is branded "odometer reading is not required"'
+    rows[4][note] = '"Lightening struck vehicle"'
+    path = write_copart_csv(tmp_path / "copart.csv", header, rows)
+
+    with CsvFile(path, COPART) as f:
+        parsed = list(f.rows())
+
+    assert (f.stats.rows_rejected, f.stats.rows_repaired, len(parsed)) == (0, 5, 6)
+    by_lot = {p.lot_number: json.loads(p.attributes) for p in parsed}
+    lot = rows[0][header.index("Lot number")]
+    assert parsed[0].values[COLUMN_INDEX["body_style"]] == "M-240ML-SLIDE 29'9\""
+    assert parsed[0].values[COLUMN_INDEX["color"]] == "TWO TONE"
+    assert by_lot[lot]["body_style"] == "M-240ML-SLIDE 29'9\""
+    assert parsed[1].values[COLUMN_INDEX["body_style"]] == 'DRY VAN 53"'
+    assert parsed[2].values[COLUMN_INDEX["trim"]] == '126" SLEEPER CAB'
+    assert json.loads(parsed[3].attributes)["special_note"] == \
+        'title is branded "odometer reading is not required"'
+    assert json.loads(parsed[4].attributes)["special_note"] == '"Lightening struck vehicle"'
+    # a row without inner quotes reads exactly as before
+    with CsvFile(write_csv(tmp_path / "std.csv", header, rows[5:]), COPART) as std:
+        assert list(std.rows())[0].attributes == parsed[5].attributes
+
+
+def test_unreadable_row_reports_its_lot_number(tmp_path):
+    header, rows = read_sample()
+    rows = [list(r) for r in rows[:2]]
+    rows[1].append("extra field")
+    lot = rows[1][header.index("Lot number")]
+    with CsvFile(write_csv(tmp_path / "x.csv", header, rows), COPART) as f:
+        assert len(list(f.rows())) == 1
+    assert f.stats.rows_rejected == 1
+    assert f.stats.unreadable_lots == {lot}

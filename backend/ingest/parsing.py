@@ -44,8 +44,14 @@ class RejectedRow:
 class ParseStats:
     rows_total: int = 0
     rows_rejected: int = 0
+    # Records the provider re-split (e.g. Copart's unescaped quotes) instead of rejecting or
+    # mangling them.
+    rows_repaired: int = 0
     rejected: list[RejectedRow] = field(default_factory=list)
     field_errors: Counter[str] = field(default_factory=Counter)
+    # Lot numbers of rows rejected for their shape: still in the export, just unreadable, so
+    # they must not be taken for removed lots.
+    unreadable_lots: set[str] = field(default_factory=set)
 
     def reject(self, row: RejectedRow) -> None:
         self.rows_rejected += 1
@@ -63,6 +69,27 @@ def row_hash(
     return payload, hashlib.sha256(canonical.encode()).digest()
 
 
+class _LineTap:
+    """Feeds lines to csv.reader and keeps the raw text of the record being read."""
+
+    def __init__(self, fh: TextIO):
+        self._fh = fh
+        self.lines: list[str] = []
+
+    def __iter__(self) -> _LineTap:
+        return self
+
+    def __next__(self) -> str:
+        line = next(self._fh)
+        self.lines.append(line)
+        return line
+
+    def take(self) -> str:
+        text = "".join(self.lines)
+        self.lines.clear()
+        return text
+
+
 class CsvFile:
     """Reads the header eagerly (so schema checks happen before any row) and rows lazily."""
 
@@ -70,7 +97,8 @@ class CsvFile:
         self.path = path
         self.provider = provider
         self._fh: TextIO = open(path, newline="", encoding="utf-8-sig", errors="replace")  # noqa: SIM115
-        self._reader = csv.reader(self._fh)
+        self._tap = _LineTap(self._fh)
+        self._reader = csv.reader(self._tap)
         try:
             source = next(self._reader)
         except StopIteration:
@@ -79,6 +107,7 @@ class CsvFile:
         except csv.Error as exc:
             self.close()
             raise FileRejected(f"unreadable header: {exc}") from exc
+        self._tap.take()
         self.source_header = [h.strip() for h in source]
         self.header = normalize_headers(self.source_header)
         self.stats = ParseStats()
@@ -114,16 +143,26 @@ class CsvFile:
 
     def rows(self) -> Iterator[ParsedRow]:
         width = len(self.header)
+        split = self.provider.split_record
         for raw in self._reader:
             line_no = self._reader.line_num
+            text = self._tap.take()
             if not raw or (len(raw) == 1 and not raw[0].strip()):
                 continue
             self.stats.rows_total += 1
+            if split is not None:
+                fields = split(text)
+                if fields is not None and len(fields) == width and fields != raw:
+                    raw = fields
+                    self.stats.rows_repaired += 1
             if len(raw) != width:
                 # A missing/extra field shifts every following column: never load such a row.
                 self.stats.reject(
                     RejectedRow(line_no, f"expected {width} fields, got {len(raw)}", raw)
                 )
+                if self._key_idx < len(raw) and (lot := self.provider.key_convert(
+                        raw[self._key_idx])) is not None:
+                    self.stats.unreadable_lots.add(lot)
                 continue
             parsed = self._parse(line_no, raw)
             if parsed is not None:
