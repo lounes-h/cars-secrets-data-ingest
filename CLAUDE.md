@@ -92,7 +92,9 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   (`core.CLOSE_LABEL`, never accept/agree), never on a challenge page;
   `COPART_DISMISS_SELECTORS` adds selectors. It waits a random 1.5–4 s before each click. A
   Chrome crash relaunches it within the run (`BROWSER_ATTEMPTS`), after stopping orphaned
-  Chrome processes on the profile. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
+  Chrome processes on the profile. The export is read from the response over CDP
+  (`Fetch.takeResponseBodyAsStream`), never through Chrome's download manager, which crashes
+  Chrome 153 on macOS when finalizing large files. Browser tests use a fake Copart on `copart.test` behind a catch-all route (no
   HTTP redirects, which bypass routing), so they never reach the real site. Pacing (≥ 45 min between downloads, exponential backoff) is enforced in
   code, not only by the scheduler. Downloads are validated, then handed to the inbox via a
   `.part` rename. It runs as an always-on process (`daemon.py`, launchd `KeepAlive`, installed

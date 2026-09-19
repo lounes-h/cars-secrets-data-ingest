@@ -311,3 +311,66 @@ def test_every_click_waits_like_a_person(bsettings, tmp_path, monkeypatch):
     assert state is PageState.READY
     # login page read, sign in, data page read, close pop-up, download: each paused first
     assert len(pauses) >= 5
+
+
+# --- the export is read from the response, not downloaded by Chrome ---------------------------
+
+def _count_chrome_downloads(context, seen):
+    context.on("page", lambda page: page.on("download", lambda d: seen.append(d)))
+    for page in context.pages:
+        page.on("download", lambda d: seen.append(d))
+
+
+def test_export_is_saved_from_the_response_never_by_chromes_download_manager(bsettings,
+                                                                             tmp_path):
+    """Chrome 153 on macOS crashes while finalizing large downloads (most runs for ~90 MB).
+    The export must never become a Chrome download; 10 MB crashed most runs before the fix."""
+    big = CSV + b"".join(CSV.split(b"\n", 1)[1] for _ in range(70))
+    assert len(big) > 10_000_000
+    seen = []
+
+    class BigExport(FakeCopart):
+        def install(self, context):
+            super().install(context)
+            _count_chrome_downloads(context, seen)
+
+        def _handle(self, route):
+            if route.request.url.endswith("/salesdata/download.csv"):
+                return route.fulfill(body=big, headers={"Content-Type": "application/octet-stream"})
+            return super()._handle(route)
+
+    state, path = browser.download(bsettings, tmp_path / "work",
+                                   prepare=BigExport(logged_in=True).install)
+    assert state is PageState.READY
+    assert path.read_bytes() == big
+    assert seen == []
+    assert sorted(p.name for p in path.parent.iterdir()) == ["salesdata.csv"]  # no .part left
+
+
+def test_export_opened_in_a_new_tab_still_arrives(bsettings, tmp_path):
+    class NewTab(FakeCopart):
+        def _handle(self, route):
+            if route.request.url.endswith("/downloadSalesData"):
+                return route.fulfill(content_type="text/html", body=DATA_PAGE.replace(
+                    "location.href='/salesdata/download.csv'",
+                    "window.open('/salesdata/download.csv')"))
+            return super()._handle(route)
+
+    state, path = browser.download(bsettings, tmp_path / "work",
+                                   prepare=NewTab(logged_in=True).install)
+    assert state is PageState.READY and path.read_bytes() == CSV
+
+
+def test_a_page_instead_of_the_file_is_not_saved(bsettings, tmp_path):
+    class ErrorPage(FakeCopart):
+        def _handle(self, route):
+            if route.request.url.endswith("/salesdata/download.csv"):
+                return route.fulfill(content_type="text/html",
+                                     body="<title>Error</title><p>Try again later</p>")
+            return super()._handle(route)
+
+    settings = bsettings.model_copy(update={"download_timeout_seconds": 3,
+                                            "browser_attempts": 1})
+    with pytest.raises(playwright.TimeoutError, match="no file received"):
+        browser.download(settings, tmp_path / "work", prepare=ErrorPage(logged_in=True).install)
+    assert not (tmp_path / "work" / "salesdata.csv").exists()
