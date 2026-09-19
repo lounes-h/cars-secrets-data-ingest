@@ -175,9 +175,9 @@ def _mark_removed(
     A scope counts as covered only if the export contains it and holds at least `min_ratio`
     of the lots active there; otherwise it looks truncated and is skipped. Within a covered
     scope, a missing lot whose sale is not over yet (sale time + grace) stays active; a later
-    export that still lacks it removes it then. Lots without a sale time have no auction
-    pending and are removed right away. Lots whose row is in the export but unreadable
-    (`unreadable`) are not missing and stay as they are.
+    export that still lacks it removes it then. Lots without a sale time are never removed:
+    Copart's export drops lots it still lists as upcoming. Lots whose row is in the export
+    but unreadable (`unreadable`) are not missing and stay as they are.
 
     Returns (lots removed, lots deferred, skipped scopes). Must run after the upsert.
     """
@@ -203,8 +203,8 @@ def _mark_removed(
     counts = conn.execute(
         f"""WITH missing AS (
                 SELECT l.source, l.lot_number,
-                       l.sale_at IS NOT NULL
-                       AND l.sale_at + make_interval(mins => %(grace)s) > now() AS pending
+                       l.sale_at IS NULL
+                       OR l.sale_at + make_interval(mins => %(grace)s) > now() AS pending
                 FROM lots l
                 WHERE l.source = %(source)s AND l.removed_at IS NULL
                   AND {lot_scope} = ANY(%(covered)s)

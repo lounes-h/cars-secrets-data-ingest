@@ -178,17 +178,17 @@ def test_lot_is_not_removed_before_its_auction_is_over(conn, settings, make_expo
     upcoming, sold, unscheduled = yard1[0], yard1[1], yard1[2]
     upcoming[sale_date] = "20990101"  # auction still ahead
     sold[sale_date] = "20200101"  # long over
-    unscheduled[sale_date] = "0"  # no sale date: nothing pending
+    unscheduled[sale_date] = "0"  # no sale date yet: still upcoming on Copart
     ingest(conn, make_export(yard1), settings)
 
     outcome = ingest(conn, make_export(yard1[3:]), settings)
 
     r = run(conn, outcome.file_id)
-    assert (r["rows_removed"], r["rows_removal_deferred"]) == (2, 1)
+    assert (r["rows_removed"], r["rows_removal_deferred"]) == (1, 2)
     state = {x["lot_number"]: x["removed_at"] is not None for x in conn.execute(
         "SELECT lot_number, removed_at FROM lots")}
-    assert state[upcoming[lot_col]] is False
-    assert state[sold[lot_col]] is True and state[unscheduled[lot_col]] is True
+    assert state[upcoming[lot_col]] is False and state[unscheduled[lot_col]] is False
+    assert state[sold[lot_col]] is True
 
 
 def test_grace_period_extends_past_the_sale_time(conn, settings, make_export):

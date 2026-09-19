@@ -71,7 +71,7 @@ npm run dev                     # dev server on :5173, proxies /api to localhost
   active lots (otherwise the yard is skipped + info alert), **and** its `sale_at` +
   `REMOVAL_GRACE_MINUTES` (120) has passed — bidding ends after the sale opens. Deferred lots
   stay active and are removed by the first later file that still lacks them. Lots without a
-  sale time have no pending auction and are removed immediately.
+  sale time are never removed: Copart's export drops lots its site still lists as upcoming.
 - **Lot photos**: `Provider.fetch_images` lists photos on demand (API
   `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
   only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,

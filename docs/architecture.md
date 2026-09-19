@@ -95,7 +95,8 @@ A lot absent from an export is marked removed only if all of these hold (`loader
 - its auction is over: `sale_at + REMOVAL_GRACE_MINUTES` (120) is in the past. A lot leaves
   the list when its sale opens, but bidding on it ends later. Lots still pending are counted
   in `ingest_files.rows_removal_deferred` and removed by the first later export that still
-  lacks them. Lots with no sale time have nothing pending and are removed right away.
+  lacks them. Lots with no sale time are never removed: Copart's export drops lots its site
+  still shows as upcoming (e.g. lot 68264956), so their absence proves nothing.
 
 A removed lot that reappears is active again.
 
