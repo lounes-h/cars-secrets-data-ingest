@@ -31,6 +31,7 @@ export interface RunDetail {
     columns: string[] | null;
     field_errors: Record<string, number> | null;
     archived_path: string | null;
+    removed_lot_numbers: string[] | null;
   };
   rejected_rows: { line_no: number; reason: string; raw: string[] }[];
   alerts: Pick<Alert, "id" | "severity" | "type" | "title" | "created_at" | "resolved_at">[];

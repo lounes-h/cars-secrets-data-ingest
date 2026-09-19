@@ -8,6 +8,7 @@ from ingest.pipeline import process_file
 from ingest.providers import COPART, PROVIDERS, LotImage, LotImages
 
 from .conftest import read_sample
+from .test_pipeline import auctions_over
 
 
 @pytest.fixture
@@ -75,6 +76,7 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
     assert authed.get("/api/runs", params={"status": "failed"}).json()["total"] == 0
     detail = authed.get(f"/api/runs/{first.file_id}").json()
     assert detail["run"]["rows_new"] == 300 and detail["rejected_rows"] == []
+    assert detail["run"]["removed_lot_numbers"] == []
     assert authed.get("/api/runs/99999").status_code == 404
 
     lot_number = rows[0][header.index("Lot number")]
@@ -91,6 +93,40 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
 
     schema = authed.get("/api/schema").json()["items"]
     assert len(schema) == 59
+
+
+def test_run_detail_returns_removed_lot_numbers(authed, conn, settings, make_export):
+    header, rows = read_sample()
+    rows = auctions_over(rows)
+    process_file(conn, make_export(rows), COPART, settings)
+    outcome = process_file(conn, make_export(rows[2:]), COPART, settings)
+    detail = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
+    expected = sorted(row[header.index("Lot number")] for row in rows[:2])
+    assert detail["rows_removed"] == len(expected)
+    assert detail["removed_lot_numbers"] == expected
+    assert not set(expected) & {row[header.index("Id")] for row in rows[:2]}
+    for lot in expected:
+        assert authed.get(f"/api/lots/copart/{lot}").status_code == 200
+
+    # Older runs can be recovered when all removals still belong to this run's interval.
+    conn.execute("UPDATE ingest_files SET removed_lot_numbers = NULL WHERE id = %s",
+                 (outcome.file_id,))
+    old = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
+    assert old["removed_lot_numbers"] == expected
+
+    # An overlapping run makes attribution ambiguous: don't guess from the timestamps.
+    overlap = conn.execute(
+        """INSERT INTO ingest_files (source, filename, sha256, status, started_at, finished_at)
+           SELECT source, 'overlap.csv', 'overlap', status, started_at, finished_at
+           FROM ingest_files WHERE id = %s RETURNING id""", (outcome.file_id,),
+    ).fetchone()["id"]
+    assert authed.get(f"/api/runs/{outcome.file_id}").json()["run"]["removed_lot_numbers"] is None
+    conn.execute("DELETE FROM ingest_files WHERE id = %s", (overlap,))
+
+    # Reappearing lots lose their removal timestamp, so a partial list isn't complete.
+    conn.execute("UPDATE lots SET removed_at = NULL WHERE lot_number = %s", (expected[0],))
+    old = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
+    assert old["removed_lot_numbers"] is None
 
 
 def test_alert_ack_and_resolve(authed, conn):

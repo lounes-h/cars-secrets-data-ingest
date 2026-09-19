@@ -72,11 +72,12 @@ def process_file(conn: Connection, path: Path, provider: Provider, settings: Set
                 """UPDATE ingest_files SET status = 'succeeded', finished_at = clock_timestamp(),
                           rows_total = %s, rows_new = %s, rows_updated = %s, rows_unchanged = %s,
                           rows_rejected = %s, rows_removed = %s, rows_removal_deferred = %s,
-                          removal_skipped = %s, columns = %s, field_errors = %s
+                          removed_lot_numbers = %s, removal_skipped = %s,
+                          columns = %s, field_errors = %s
                    WHERE id = %s""",
                 (result.rows_total, result.rows_new, result.rows_updated, result.rows_unchanged,
                  result.rows_rejected, result.rows_removed, result.rows_removal_deferred,
-                 Jsonb(result.removal_skipped),
+                 result.removed_lot_numbers, Jsonb(result.removal_skipped),
                  Jsonb(csv_file.source_header), Jsonb(result.field_errors), file_id),
             )
             facts = RunFacts(

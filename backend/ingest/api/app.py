@@ -257,11 +257,27 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     @api.get("/runs/{run_id}")
     def run_detail(run_id: int, conn: Conn) -> dict[str, Any]:
         run = conn.execute(
-            f"SELECT {RUN_COLUMNS}, columns, field_errors, archived_path "
+            f"SELECT {RUN_COLUMNS}, columns, field_errors, archived_path, removed_lot_numbers "
             "FROM ingest_files WHERE id = %s", (run_id,),
         ).fetchone()
         if run is None:
             raise HTTPException(404, "run not found")
+        if run["removed_lot_numbers"] is None and run["rows_removed"]:
+            # Older runs saved only counts. Recover a list only when every removal can
+            # be attributed to this run alone; reappearances can erase that evidence.
+            removed = conn.execute(
+                """SELECT lot_number FROM lots l
+                   WHERE l.source = %(source)s
+                     AND l.removed_at BETWEEN %(started_at)s AND %(finished_at)s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM ingest_files f
+                         WHERE f.source = l.source AND f.id <> %(id)s
+                           AND f.status = 'succeeded'
+                           AND l.removed_at BETWEEN f.started_at AND f.finished_at)
+                   ORDER BY lot_number""", run,
+            ).fetchall()
+            if len(removed) == run["rows_removed"]:
+                run["removed_lot_numbers"] = [lot["lot_number"] for lot in removed]
         rejected = conn.execute(
             """SELECT line_no, reason, raw FROM rejected_rows WHERE file_id = %s
                ORDER BY line_no LIMIT 200""", (run_id,),
