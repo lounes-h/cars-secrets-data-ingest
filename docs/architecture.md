@@ -35,7 +35,7 @@ downloader ──► data/inbox/<provider>/*.csv
 
 | Table | Holds |
 |---|---|
-| `ingest_files` | One row per file received: status, counts, duration, header, error, archive path |
+| `ingest_files` | One row per file received: status, counts, removed lot numbers, duration, header, error, archive path |
 | `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at` |
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
@@ -99,6 +99,16 @@ A lot absent from an export is marked removed only if all of these hold (`loader
   still shows as upcoming (e.g. lot 68264956), so their absence proves nothing.
 
 A removed lot that reappears is active again.
+
+The load transaction saves the exact removed `lot_number` values in
+`ingest_files.removed_lot_numbers`. `GET /api/runs/{run_id}` includes this list on `run`,
+and the run details display each number as a link to the lot. The list stays unchanged if a
+lot later reappears. An empty list means no removals; NULL means the list was not recorded
+(including runs from before migration 0005). For older runs, the API recovers lot numbers
+whose removal timestamps fall within that run alone, provided their count matches
+`rows_removed`. If lots reappeared or run intervals overlap, a complete list may no longer
+be recoverable; the UI labels it unavailable. Copart's CSV `Id` row counter is never used as
+a lot identifier.
 
 ## Lot photos
 

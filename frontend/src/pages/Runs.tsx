@@ -152,6 +152,21 @@ export function RunDetailPage() {
         </div>
       </div>
 
+      {!!run.rows_removed && (
+        <div className="card">
+          <h2>Removed lots ({int(run.rows_removed)})</h2>
+          {run.removed_lot_numbers == null
+            ? <p className="muted">The complete removed-lot list is unavailable for this older run.</p>
+            : <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
+                {run.removed_lot_numbers.map((lot) => (
+                  <Link key={lot} to={`/lots/${encodeURIComponent(run.source)}/${encodeURIComponent(lot)}`}>
+                    {lot}
+                  </Link>
+                ))}
+              </div>}
+        </div>
+      )}
+
       {alerts.length > 0 && (
         <div className="card">
           <h2>Alerts from this run</h2>

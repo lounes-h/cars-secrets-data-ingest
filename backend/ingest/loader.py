@@ -39,6 +39,7 @@ class LoadResult:
     rows_rejected: int = 0
     rows_repaired: int = 0
     rows_removed: int = 0
+    removed_lot_numbers: list[str] = field(default_factory=list)
     rows_removal_deferred: int = 0
     removal_skipped: list[str] = field(default_factory=list)
     baseline_rows: float | None = None
@@ -155,10 +156,12 @@ def load_file(
         {"source": source, "file_id": file_id, **params},
     )
 
-    result.rows_removed, result.rows_removal_deferred, result.removal_skipped = _mark_removed(
+    (result.removed_lot_numbers, result.rows_removal_deferred,
+     result.removal_skipped) = _mark_removed(
         conn, source, csv_file.provider.removal_scope, settings.removal_min_ratio,
         settings.removal_grace_minutes, sorted(csv_file.stats.unreadable_lots),
     )
+    result.rows_removed = len(result.removed_lot_numbers)
 
     _update_registry(conn, file_id, csv_file, registry, result)
     _store_rejects(conn, file_id, rejects)
@@ -169,7 +172,7 @@ def load_file(
 def _mark_removed(
     conn: Connection, source: str, scope_column: str | None, min_ratio: float,
     grace_minutes: int, unreadable: Sequence[str] = (),
-) -> tuple[int, int, list[str]]:
+) -> tuple[list[str], int, list[str]]:
     """Mark lots absent from the export as removed, scope by scope (e.g. per yard).
 
     A scope counts as covered only if the export contains it and holds at least `min_ratio`
@@ -179,7 +182,7 @@ def _mark_removed(
     Copart's export drops lots it still lists as upcoming. Lots whose row is in the export
     but unreadable (`unreadable`) are not missing and stay as they are.
 
-    Returns (lots removed, lots deferred, skipped scopes). Must run after the upsert.
+    Returns (removed lot numbers, lots deferred, skipped scopes). Must run after the upsert.
     """
     # No scope column: the whole provider is a single scope.
     scope = scope_column or "''::text"
@@ -199,7 +202,7 @@ def _mark_removed(
     covered = [r["scope"] for r in rows if r["covered"]]
     skipped = sorted(r["scope"] or "(all)" for r in rows if not r["covered"])
     if not covered:
-        return 0, 0, skipped
+        return [], 0, skipped
     counts = conn.execute(
         f"""WITH missing AS (
                 SELECT l.source, l.lot_number,
@@ -214,8 +217,8 @@ def _mark_removed(
                 UPDATE lots l SET removed_at = now()
                 FROM missing m
                 WHERE NOT m.pending AND l.source = m.source AND l.lot_number = m.lot_number
-                RETURNING 1)
-            SELECT (SELECT count(*) FROM removed)                     AS removed,
+                RETURNING l.lot_number)
+            SELECT ARRAY(SELECT lot_number FROM removed ORDER BY lot_number) AS removed,
                    (SELECT count(*) FROM missing WHERE pending)       AS deferred""",
         {"source": source, "covered": covered, "grace": grace_minutes,
          "unreadable": list(unreadable)},

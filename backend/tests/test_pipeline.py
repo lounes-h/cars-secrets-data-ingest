@@ -58,6 +58,7 @@ def test_first_ingest_loads_lots_and_rejects_bad_rows(conn, settings):
     assert outcome.status == "succeeded"
     r = run(conn, outcome.file_id)
     assert (r["rows_total"], r["rows_new"], r["rows_rejected"]) == (302, 300, 2)
+    assert r["removed_lot_numbers"] == []
     assert r["finished_at"] > r["started_at"]  # wall clock, not the transaction start
     assert conn.execute("SELECT count(*) AS n FROM lots").fetchone()["n"] == 300
     assert conn.execute("SELECT count(*) AS n FROM rejected_rows").fetchone()["n"] == 2
@@ -120,6 +121,8 @@ def test_missing_lots_are_removed_only_in_yards_the_export_covers(conn, settings
     outcome = ingest(conn, make_export(yard1[4:]), settings)
 
     assert run(conn, outcome.file_id)["rows_removed"] == 4
+    assert run(conn, outcome.file_id)["removed_lot_numbers"] == sorted(
+        r[col(header, "Lot number")] for r in yard1[:4])
     removed = conn.execute(
         "SELECT yard_code, count(*) AS n FROM lots WHERE removed_at IS NOT NULL GROUP BY 1"
     ).fetchall()
@@ -130,13 +133,14 @@ def test_removed_lot_that_comes_back_is_active_again(conn, settings, make_export
     header, rows = read_sample()
     rows = auctions_over(rows)
     ingest(conn, make_export(rows), settings)
-    ingest(conn, make_export(rows[1:]), settings)
+    removal = ingest(conn, make_export(rows[1:]), settings)
     lot = rows[0][col(header, "Lot number")]
     assert conn.execute("SELECT removed_at FROM lots WHERE lot_number = %s",
                         (lot,)).fetchone()["removed_at"] is not None
     ingest(conn, make_export(rebytes(rows)), settings)
     assert conn.execute("SELECT removed_at FROM lots WHERE lot_number = %s",
                         (lot,)).fetchone()["removed_at"] is None
+    assert run(conn, removal.file_id)["removed_lot_numbers"] == [lot]
 
 
 def test_lot_whose_row_is_unreadable_is_not_removed(conn, settings, make_export):
@@ -151,6 +155,7 @@ def test_lot_whose_row_is_unreadable_is_not_removed(conn, settings, make_export)
 
     r = run(conn, outcome.file_id)
     assert (r["rows_rejected"], r["rows_removed"]) == (1, 1)
+    assert r["removed_lot_numbers"] == [gone[col(header, "Lot number")]]
     removed = {x["lot_number"] for x in conn.execute(
         "SELECT lot_number FROM lots WHERE removed_at IS NOT NULL")}
     assert removed == {gone[col(header, "Lot number")]}
@@ -185,6 +190,7 @@ def test_lot_is_not_removed_before_its_auction_is_over(conn, settings, make_expo
 
     r = run(conn, outcome.file_id)
     assert (r["rows_removed"], r["rows_removal_deferred"]) == (1, 2)
+    assert r["removed_lot_numbers"] == [sold[lot_col]]
     state = {x["lot_number"]: x["removed_at"] is not None for x in conn.execute(
         "SELECT lot_number, removed_at FROM lots")}
     assert state[upcoming[lot_col]] is False and state[unscheduled[lot_col]] is False
@@ -220,6 +226,7 @@ def test_truncated_yard_is_not_wiped(conn, settings, make_export):
 
     r = run(conn, outcome.file_id)
     assert r["rows_removed"] == 0
+    assert r["removed_lot_numbers"] == []
     assert r["removal_skipped"] == ["2"]
     assert open_alerts(conn)["removal_skipped"]["details"]["scopes"] == ["2"]
 
