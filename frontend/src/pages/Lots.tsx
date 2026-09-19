@@ -96,13 +96,15 @@ export function LotDetailPage() {
     queryFn: () => api.lotImages(source, lotNumber),
     staleTime: 15 * 60_000,
   });
-  if (!q.data) return <QueryState isLoading={q.isLoading} error={q.error} />;
+  const back = <Link to="/lots" className="back-link">← Lots</Link>;
+  if (!q.data) return <div className="stack">{back}<QueryState isLoading={q.isLoading} error={q.error} /></div>;
   const { lot, history } = q.data;
   const attributes = Object.entries(lot.attributes).sort(([a], [b]) => a.localeCompare(b));
   const title = [lot.year, lot.make, lot.model_group, lot.model_detail].filter(Boolean).join(" ");
 
   return (
     <div className="stack">
+      {back}
       <div className="topbar">
         <h1>
           {title}{" "}
