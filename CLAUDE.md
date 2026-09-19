@@ -449,7 +449,6 @@ Update the document that owns the subject:
 | rules, commands, current state | `CLAUDE.md` |
 | layering, the feature registry, sync collections | `docs/architecture.md` |
 | auth, join codes, isolation, anything returning household data | `docs/security.md` |
-| deployment, environment, the entrypoint | `docs/deploy-render.md` |
 
 Prefer correcting the existing document to adding a new one. A stale sentence is
 worse than no sentence, because it is trusted — so delete what stopped being
