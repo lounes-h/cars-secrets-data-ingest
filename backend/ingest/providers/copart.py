@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -44,6 +45,48 @@ _TIME_ZONE = ("time_zone",)
 
 def _derive(raw: RawGetter, values: dict[str, Any]) -> None:
     values["sale_at"] = local_timestamp(values.get("sale_date"), raw(_SALE_TIME), raw(_TIME_ZONE))
+
+
+# Copart writes each text field as '"' + value + '"' and never escapes a quote inside the
+# value (inches: `29'9"`, quoted notes), which standard CSV parsing mangles or rejects. Such a
+# quote sits inside a field: not right after a comma / line start, nor right before a comma /
+# line end.
+_INNER_QUOTE = re.compile(r'(?<=[^,\n])"(?=[^,\r\n])')
+
+
+def split_unescaped_quotes(record: str) -> list[str] | None:
+    """Split a record the way Copart wrote it: a quoted field ends at the first quote that is
+    followed by a comma or the end of the line. Only for records holding an inner quote
+    (None otherwise, and when the record does not follow that shape either)."""
+    if not _INNER_QUOTE.search(record):
+        return None
+    line = record.rstrip("\r\n")
+    end = len(line)
+    fields: list[str] = []
+    i = 0
+    while True:
+        if i < end and line[i] == '"':
+            j = i + 1
+            while True:
+                k = line.find('"', j)
+                if k == -1:
+                    return None
+                if k + 1 == end or line[k + 1] == ",":
+                    break
+                j = k + 1
+            fields.append(line[i + 1:k])
+            i = k + 1
+        else:
+            k = line.find(",", i)
+            k = end if k == -1 else k
+            value = line[i:k]
+            if '"' in value:  # unquoted fields never hold quotes in Copart's output
+                return None
+            fields.append(value)
+            i = k
+        if i == end:
+            return fields
+        i += 1  # the comma
 
 
 # The lot's `image_url` points at Copart's image API, which lists every photo of the lot.
@@ -159,6 +202,7 @@ COPART = Provider(
         _f("source_updated_at", to_iso_utc, "last_updated_time"),
     ),
     derive=_derive,
+    split_record=split_unescaped_quotes,
     derived_sources={alias: "sale_at" for alias in _SALE_TIME + _TIME_ZONE},
     # Downloads can be a subset of yards (seen: 44 of 224), so absence only means removal
     # for lots of a yard the export contains.

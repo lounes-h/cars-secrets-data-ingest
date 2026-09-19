@@ -106,7 +106,8 @@ def process_file(conn: Connection, path: Path, provider: Provider, settings: Set
     log.info("ingest.succeeded", file_id=file_id, rows=result.rows_total, new=result.rows_new,
              updated=result.rows_updated, removed=result.rows_removed,
              removal_deferred=result.rows_removal_deferred,
-             rejected=result.rows_rejected, seconds=round(time.monotonic() - started, 1))
+             rejected=result.rows_rejected, repaired=result.rows_repaired,
+             seconds=round(time.monotonic() - started, 1))
     _archive(conn, path, file_id, source, settings)
     return Outcome(file_id, "succeeded")
 

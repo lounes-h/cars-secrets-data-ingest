@@ -5,7 +5,7 @@ import shutil
 from ingest.pipeline import mark_interrupted, process_file
 from ingest.providers import COPART
 
-from .conftest import SAMPLE, read_sample
+from .conftest import SAMPLE, read_sample, write_copart_csv
 
 
 def ingest(conn, path, settings):
@@ -137,6 +137,37 @@ def test_removed_lot_that_comes_back_is_active_again(conn, settings, make_export
     ingest(conn, make_export(rebytes(rows)), settings)
     assert conn.execute("SELECT removed_at FROM lots WHERE lot_number = %s",
                         (lot,)).fetchone()["removed_at"] is None
+
+
+def test_lot_whose_row_is_unreadable_is_not_removed(conn, settings, make_export):
+    """A row rejected for its shape is still in the export: its lot was wrongly marked
+    removed (seen with Copart's unescaped inch marks)."""
+    header, rows = read_sample()
+    rows = auctions_over(rows)
+    ingest(conn, make_export(rows), settings)
+    broken, gone = rows[0], rows[1]
+    lot = broken[col(header, "Lot number")]
+    outcome = ingest(conn, make_export([broken + ["shifted"], *rebytes(rows[2:])]), settings)
+
+    r = run(conn, outcome.file_id)
+    assert (r["rows_rejected"], r["rows_removed"]) == (1, 1)
+    removed = {x["lot_number"] for x in conn.execute(
+        "SELECT lot_number FROM lots WHERE removed_at IS NOT NULL")}
+    assert removed == {gone[col(header, "Lot number")]}
+    assert lot not in removed
+
+
+def test_copart_export_with_unescaped_inch_marks_loads_every_lot(conn, settings):
+    header, rows = read_sample()
+    rows = [list(r) for r in rows]
+    rows[0][col(header, "Body Style")] = "M-240ML-SLIDE 29'9\""
+    path = write_copart_csv(settings.inbox_dir / "copart" / "real.csv", header, rows)
+    outcome = ingest(conn, path, settings)
+    r = run(conn, outcome.file_id)
+    assert (r["rows_new"], r["rows_rejected"]) == (300, 0)
+    lot = rows[0][col(header, "Lot number")]
+    assert conn.execute("SELECT body_style FROM lots WHERE lot_number = %s",
+                        (lot,)).fetchone()["body_style"] == "M-240ML-SLIDE 29'9\""
 
 
 def test_lot_is_not_removed_before_its_auction_is_over(conn, settings, make_export):

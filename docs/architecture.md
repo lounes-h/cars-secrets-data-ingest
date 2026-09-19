@@ -57,6 +57,21 @@ common queries can use indexes. Concretely:
   if the column comes back.
 - **Lot key missing**: the file is rejected and moved to `failed/`, critical alert.
 
+### Malformed rows
+
+Copart writes every text field as `"` + value + `"` and never escapes a quote inside a
+value: inch marks (`M-240ML-SLIDE 29'9"` is written `"M-240ML-SLIDE 29'9""`) or quoted
+notes. A standard CSV parser rejects some of these rows (the field swallows the next one)
+and silently mangles others (`126" SLEEPER CAB` read as `126 SLEEPER CAB"`). The provider's
+`split_record` hook re-reads any record with a quote inside a field the way Copart wrote it:
+a quoted field ends at the first quote followed by a comma or the line end. The result is
+used only if it has exactly one field per header column. In a real 139,545-row export this
+fixed 28 rows (6 had been rejected) and changed nothing else.
+
+A row that still has the wrong field count is rejected (`rejected_rows`), since every column
+after the fault would be shifted. Its lot is still in the export, though, so it is never
+marked removed because of that file.
+
 ### Change detection and duplicates
 
 Each row's hash covers its attributes except the provider's *ignored* columns (`Id`, the
