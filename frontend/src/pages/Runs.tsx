@@ -127,7 +127,7 @@ export function RunDetailPage() {
             {!!run.rows_removal_deferred && (
               <>
                 <dt>Removal deferred</dt>
-                <dd title="Missing from this file, but the auction (sale time + grace period) isn't over yet">
+                <dd title="Missing from this file, but the auction (sale time + grace period) isn't over yet, or not scheduled">
                   {int(run.rows_removal_deferred)} lots (auction not over yet)
                 </dd>
               </>
