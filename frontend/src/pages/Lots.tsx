@@ -20,6 +20,8 @@ function useDebounced<T>(value: T, ms = 300): T {
 
 export function LotsPage() {
   const navigate = useNavigate();
+  const overview = useQuery({ queryKey: ["overview"], queryFn: api.overview });
+  const counts = overview.data?.lots;
   const [input, setInput] = useState("");
   const [state, setState] = useState<State>("all");
   const [offset, setOffset] = useState(0);
@@ -37,7 +39,11 @@ export function LotsPage() {
           aria-label="Search lots" style={{ width: 320, maxWidth: "100%" }}
           onChange={(e) => { setInput(e.target.value); setOffset(0); }} />
         <Segmented<State> label="Lot state" value={state} onChange={(v) => { setState(v); setOffset(0); }}
-          options={[{ value: "all", label: "All" }, { value: "active", label: "Active" }, { value: "removed", label: "Removed" }]} />
+          options={[
+            { value: "all", label: `All (${int(counts ? counts.active + counts.removed : null)})` },
+            { value: "active", label: `Active (${int(counts?.active)})` },
+            { value: "removed", label: `Removed (${int(counts?.removed)})` },
+          ]} />
       </div>
       <QueryState isLoading={lots.isLoading} error={lots.error} />
       {lots.data && (

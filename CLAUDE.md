@@ -201,7 +201,8 @@ A code change is not considered complete until the relevant unit tests have been
 - Working end to end: watcher → ingest → Postgres, change history, schema-drift handling,
   yard-scoped removals deferred until the auction is over, alerts (dashboard only, no
   email/Slack by decision), dashboard with login, live updates, run retry, lot explorer with
-  photos. One provider: Copart.
+  photos. The Lots page's All, Active, and Removed filters show inventory totals, independent
+  of search and pagination, refreshed by live ingestion events. One provider: Copart.
 - Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
 - Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
