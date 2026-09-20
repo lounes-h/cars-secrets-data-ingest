@@ -4,7 +4,9 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { NextDownload } from "../components/NextDownload";
 import { useToast } from "../components/Toasts";
 import { Pager, QueryState, RunStatusBadge, Segmented, SeverityBadge } from "../components/ui";
-import { api, type RunStatus } from "../lib/api";
+import {
+  api, type RejectedRow, type RunDetail, type RunLot, type RunRowKind, type RunStatus,
+} from "../lib/api";
 import { bytes, dateTime, duration, int } from "../lib/format";
 
 const LIMIT = 50;
@@ -88,7 +90,7 @@ export function RunDetailPage() {
   });
 
   if (!q.data) return <QueryState isLoading={q.isLoading} error={q.error} />;
-  const { run, rejected_rows, alerts } = q.data;
+  const { run, alerts } = q.data;
   const fieldErrors = Object.entries(run.field_errors ?? {});
 
   return (
@@ -152,20 +154,7 @@ export function RunDetailPage() {
         </div>
       </div>
 
-      {!!run.rows_removed && (
-        <div className="card">
-          <h2>Removed lots ({int(run.rows_removed)})</h2>
-          {run.removed_lot_numbers == null
-            ? <p className="muted">The complete removed-lot list is unavailable for this older run.</p>
-            : <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px" }}>
-                {run.removed_lot_numbers.map((lot) => (
-                  <Link key={lot} to={`/lots/${encodeURIComponent(run.source)}/${encodeURIComponent(lot)}`}>
-                    {lot}
-                  </Link>
-                ))}
-              </div>}
-        </div>
-      )}
+      <RunRowsCard run={run} />
 
       {alerts.length > 0 && (
         <div className="card">
@@ -180,32 +169,114 @@ export function RunDetailPage() {
         </div>
       )}
 
-      <div>
-        <h2>Rejected rows {rejected_rows.length > 0 && <span className="muted">(first {rejected_rows.length})</span>}</h2>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th className="num">Line</th><th>Reason</th><th>Raw values</th></tr></thead>
-            <tbody>
-              {rejected_rows.map((r) => (
-                <tr key={r.line_no}>
-                  <td className="num">{r.line_no}</td>
-                  <td>{r.reason}</td>
-                  <td className="mono small wrap-anywhere">{r.raw.slice(0, 12).join(" | ")}{r.raw.length > 12 && " | …"}</td>
-                </tr>
-              ))}
-              {rejected_rows.length === 0 && (
-                <tr><td colSpan={3} className="empty">No rejected rows.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
       {run.columns && (
         <details className="card">
           <summary>{run.columns.length} columns in this file</summary>
           <p className="small ink-2 wrap-anywhere">{run.columns.join(" · ")}</p>
         </details>
+      )}
+    </div>
+  );
+}
+
+const KIND_LABEL: Record<RunRowKind, string> = {
+  new: "New", updated: "Updated", removed: "Removed", rejected: "Rejected",
+};
+const isRejected = (row: RunLot | RejectedRow): row is RejectedRow => "line_no" in row;
+const isLot = (row: RunLot | RejectedRow): row is RunLot => !("line_no" in row);
+
+/** The lots a run created, changed or removed, and the rows it rejected — one page at a time:
+ *  a single export can hold well over 100k of them. */
+function RunRowsCard({ run }: { run: RunDetail["run"] }) {
+  const navigate = useNavigate();
+  const [kind, setKind] = useState<RunRowKind>("new");
+  const [offset, setOffset] = useState(0);
+  const q = useQuery({
+    queryKey: ["run-rows", run.id, kind, offset],
+    queryFn: () => api.runRows(run.id, { kind, limit: LIMIT, offset }),
+  });
+  const counts: Record<RunRowKind, number | null> = {
+    new: run.rows_new, updated: run.rows_updated,
+    removed: run.rows_removed, rejected: run.rows_rejected,
+  };
+  const lotUrl = (lot: RunLot) =>
+    `/lots/${encodeURIComponent(lot.source)}/${encodeURIComponent(lot.lot_number)}`;
+  // Only the first 1,000 rejected rows of a file are kept, so the tab can hold fewer than the count.
+  const dropped = kind === "rejected" && q.data ? (run.rows_rejected ?? 0) - q.data.total : 0;
+
+  return (
+    <div className="card stack">
+      <h2>What this run did</h2>
+      <Segmented<RunRowKind> label="Which lots" value={kind}
+        onChange={(v) => { setKind(v); setOffset(0); }}
+        options={(Object.keys(KIND_LABEL) as RunRowKind[]).map((k) => ({
+          value: k, label: `${KIND_LABEL[k]} (${int(counts[k])})`,
+        }))} />
+      {kind === "removed" && q.data?.available && q.data.reason && (
+        <p className="muted small">Reason for removal: {q.data.reason}</p>
+      )}
+      {dropped > 0 && (
+        <p className="muted small">
+          Showing the {int(q.data?.total)} rejected rows that were kept; {int(dropped)} more were
+          rejected but not stored.
+        </p>
+      )}
+      <QueryState isLoading={q.isLoading} error={q.error} />
+      {q.data && !q.data.available && (
+        <p className="muted">The complete removed-lot list is unavailable for this older run.</p>
+      )}
+      {q.data && q.data.available && (
+        <>
+          <div className="table-wrap" style={{ opacity: q.isFetching ? 0.7 : 1 }}>
+            {kind === "rejected" ? (
+              <table>
+                <thead><tr><th className="num">Line</th><th>Reason</th><th>Raw values</th></tr></thead>
+                <tbody>
+                  {q.data.items.filter(isRejected).map((r) => (
+                    <tr key={r.line_no}>
+                      <td className="num">{r.line_no}</td>
+                      <td>{r.reason}</td>
+                      <td className="mono small wrap-anywhere">
+                        {r.raw.slice(0, 12).join(" | ")}{r.raw.length > 12 && " | …"}
+                      </td>
+                    </tr>
+                  ))}
+                  {q.data.items.length === 0 && (
+                    <tr><td colSpan={3} className="empty">No rejected rows.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Lot</th><th>Vehicle</th><th>VIN</th><th>Yard</th><th>Sale</th>
+                    {kind === "removed" && <th>Removed</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {q.data.items.filter(isLot).map((l) => (
+                    <tr key={l.lot_number} className="clickable" onClick={() => navigate(lotUrl(l))}>
+                      <td><Link to={lotUrl(l)}>{l.lot_number}</Link></td>
+                      <td>{[l.year, l.make, l.model_group].filter(Boolean).join(" ") || "—"}
+                        <div className="muted small">{l.trim}</div></td>
+                      <td className="mono small">{l.vin ?? "—"}</td>
+                      <td>{l.yard_name ?? "—"}</td>
+                      <td>{dateTime(l.sale_at)}<div className="muted small">{l.sale_status}</div></td>
+                      {kind === "removed" && <td>{dateTime(l.removed_at)}</td>}
+                    </tr>
+                  ))}
+                  {q.data.items.length === 0 && (
+                    <tr><td colSpan={kind === "removed" ? 6 : 5} className="empty">
+                      No {KIND_LABEL[kind].toLowerCase()} lots.
+                    </td></tr>
+                  )}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <Pager offset={offset} limit={LIMIT} total={q.data.total} onChange={setOffset} />
+        </>
       )}
     </div>
   );

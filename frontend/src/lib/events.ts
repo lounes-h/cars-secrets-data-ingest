@@ -11,7 +11,8 @@ export function queriesFor(event: PipelineEvent): string[][] {
   switch (event.type) {
     case "run_started":
     case "run_finished":
-      return [["overview"], ["runs"], ["run"], ["lots"], ["lot"], ["schema"], ["downloader"]];
+      return [["overview"], ["runs"], ["run"], ["run-rows"], ["lots"], ["lot"], ["schema"],
+              ["downloader"]];
     case "downloader":
       return [["downloader"], ["overview"]];
     case "alert":

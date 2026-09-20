@@ -28,7 +28,8 @@ def test_health_is_public(client):
     assert client.get("/api/health").json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize("path", ["/api/overview", "/api/runs", "/api/alerts", "/api/schema",
+@pytest.mark.parametrize("path", ["/api/overview", "/api/runs", "/api/runs/1/rows?kind=new",
+                                  "/api/alerts", "/api/schema",
                                   "/api/lots", "/api/auth/me", "/api/events"])
 def test_everything_else_requires_login(client, path):
     assert client.get(path).status_code == 401
@@ -75,8 +76,7 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
     assert runs["total"] == 2 and runs["items"][0]["rows_updated"] == 1
     assert authed.get("/api/runs", params={"status": "failed"}).json()["total"] == 0
     detail = authed.get(f"/api/runs/{first.file_id}").json()
-    assert detail["run"]["rows_new"] == 300 and detail["rejected_rows"] == []
-    assert detail["run"]["removed_lot_numbers"] == []
+    assert detail["run"]["rows_new"] == 300
     assert authed.get("/api/runs/99999").status_code == 404
 
     lot_number = rows[0][header.index("Lot number")]
@@ -95,24 +95,71 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
     assert len(schema) == 59
 
 
-def test_run_detail_returns_removed_lot_numbers(authed, conn, settings, make_export):
+def test_run_rows_page_through_new_updated_and_rejected(authed, conn, settings, make_export):
+    header, rows = read_sample()
+    first = process_file(conn, make_export(rows), COPART, settings)
+
+    def page(file_id, **params):
+        r = authed.get(f"/api/runs/{file_id}/rows", params=params)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    numbers = sorted(row[header.index("Lot number")] for row in rows)
+    new = page(first.file_id, kind="new", limit=2)
+    assert (new["total"], new["available"], new["reason"]) == (300, True, None)
+    assert [item["lot_number"] for item in new["items"]] == numbers[:2]
+    assert new["items"][0]["vin"] and "attributes" not in new["items"][0]
+    assert [item["lot_number"] for item in
+            page(first.file_id, kind="new", limit=2, offset=2)["items"]] == numbers[2:4]
+    assert page(first.file_id, kind="new", limit=2, offset=300)["items"] == []
+    assert page(first.file_id, kind="updated")["items"] == []
+
+    changed = [list(r) for r in rows]
+    changed[0][header.index("High Bid =non-vix,Sealed=Vix")] = "4242.0"
+    second = process_file(conn, make_export(changed), COPART, settings)
+    updated = page(second.file_id, kind="updated")
+    assert updated["total"] == 1
+    assert ([item["lot_number"] for item in updated["items"]]
+            == [changed[0][header.index("Lot number")]])
+    assert page(second.file_id, kind="new")["items"] == []
+
+    # The same lot twice in one file: the earlier row is rejected, with the reason.
+    third = process_file(conn, make_export([*changed, changed[5]]), COPART, settings)
+    rejected = page(third.file_id, kind="rejected")
+    assert rejected["total"] == 1 and rejected["reason"] is None
+    assert rejected["items"][0]["reason"].startswith("duplicate lot number")
+    assert rejected["items"][0]["raw"]
+
+    assert authed.get("/api/runs/99999/rows", params={"kind": "new"}).status_code == 404
+    assert authed.get(f"/api/runs/{first.file_id}/rows", params={"kind": "nope"}).status_code == 422
+
+
+def test_run_rows_list_removed_lots_with_the_reason(authed, conn, settings, make_export):
     header, rows = read_sample()
     rows = auctions_over(rows)
     process_file(conn, make_export(rows), COPART, settings)
     outcome = process_file(conn, make_export(rows[2:]), COPART, settings)
-    detail = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
     expected = sorted(row[header.index("Lot number")] for row in rows[:2])
-    assert detail["rows_removed"] == len(expected)
-    assert detail["removed_lot_numbers"] == expected
+
+    def removed(**params):
+        return authed.get(f"/api/runs/{outcome.file_id}/rows",
+                          params={"kind": "removed", **params}).json()
+
+    page = removed()
+    assert page["total"] == len(expected) and page["available"]
+    assert [item["lot_number"] for item in page["items"]] == expected
+    assert all(item["removed_at"] for item in page["items"])
+    assert "grace period" in page["reason"]
     assert not set(expected) & {row[header.index("Id")] for row in rows[:2]}
+    assert [item["lot_number"] for item in removed(limit=1)["items"]] == expected[:1]
+    assert [item["lot_number"] for item in removed(limit=1, offset=1)["items"]] == expected[1:]
     for lot in expected:
         assert authed.get(f"/api/lots/copart/{lot}").status_code == 200
 
     # Older runs can be recovered when all removals still belong to this run's interval.
     conn.execute("UPDATE ingest_files SET removed_lot_numbers = NULL WHERE id = %s",
                  (outcome.file_id,))
-    old = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
-    assert old["removed_lot_numbers"] == expected
+    assert [item["lot_number"] for item in removed()["items"]] == expected
 
     # An overlapping run makes attribution ambiguous: don't guess from the timestamps.
     overlap = conn.execute(
@@ -120,13 +167,13 @@ def test_run_detail_returns_removed_lot_numbers(authed, conn, settings, make_exp
            SELECT source, 'overlap.csv', 'overlap', status, started_at, finished_at
            FROM ingest_files WHERE id = %s RETURNING id""", (outcome.file_id,),
     ).fetchone()["id"]
-    assert authed.get(f"/api/runs/{outcome.file_id}").json()["run"]["removed_lot_numbers"] is None
+    ambiguous = removed()
+    assert (ambiguous["items"], ambiguous["total"], ambiguous["available"]) == ([], 2, False)
     conn.execute("DELETE FROM ingest_files WHERE id = %s", (overlap,))
 
     # Reappearing lots lose their removal timestamp, so a partial list isn't complete.
     conn.execute("UPDATE lots SET removed_at = NULL WHERE lot_number = %s", (expected[0],))
-    old = authed.get(f"/api/runs/{outcome.file_id}").json()["run"]
-    assert old["removed_lot_numbers"] is None
+    assert removed()["available"] is False
 
 
 def test_alert_ack_and_resolve(authed, conn):

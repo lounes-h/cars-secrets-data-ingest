@@ -101,14 +101,37 @@ A lot absent from an export is marked removed only if all of these hold (`loader
 A removed lot that reappears is active again.
 
 The load transaction saves the exact removed `lot_number` values in
-`ingest_files.removed_lot_numbers`. `GET /api/runs/{run_id}` includes this list on `run`,
-and the run details display each number as a link to the lot. The list stays unchanged if a
-lot later reappears. An empty list means no removals; NULL means the list was not recorded
-(including runs from before migration 0005). For older runs, the API recovers lot numbers
-whose removal timestamps fall within that run alone, provided their count matches
-`rows_removed`. If lots reappeared or run intervals overlap, a complete list may no longer
-be recoverable; the UI labels it unavailable. Copart's CSV `Id` row counter is never used as
-a lot identifier.
+`ingest_files.removed_lot_numbers`. The list stays unchanged if a lot later reappears. An
+empty list means no removals; NULL means the list was not recorded (including runs from
+before migration 0005). For older runs, the API recovers lot numbers whose removal timestamps
+fall within that run alone, provided their count matches `rows_removed`. If lots reappeared or
+run intervals overlap, a complete list may no longer be recoverable; the UI labels it
+unavailable. Copart's CSV `Id` row counter is never used as a lot identifier.
+
+## What a run did
+
+`GET /api/runs/{run_id}` returns the run and its alerts only: an export can create, change or
+remove six figures of lots, so the four lists are paged separately by
+`GET /api/runs/{run_id}/rows?kind=new|updated|removed|rejected&limit=&offset=`, which answers
+`{items, total, available, reason}`. The run details page shows them as tabs, each with its
+count, one page (50 rows) at a time.
+
+| kind | rows | where they come from |
+|---|---|---|
+| `new` | lots | `lots.first_file_id = run_id` (never rewritten once set) |
+| `updated` | lots | `lot_versions.superseded_by_file_id = run_id`, one row per changed lot |
+| `removed` | lots | `ingest_files.removed_lot_numbers`, sliced by `offset`/`limit` |
+| `rejected` | raw rows | `rejected_rows`, with the per-row reason |
+
+Migration 0006 indexes the first two lookups (`lots (first_file_id, lot_number)`,
+`lot_versions (superseded_by_file_id, lot_number)`); without them each page scans every lot.
+
+`total` reuses the counts the load transaction wrote, except for rejected rows: only the first
+`MAX_STORED_REJECTS` (1,000) of a file are kept, so those are counted and the UI says how many
+more were rejected without being stored. `reason` carries the removal rule in words (missing
+from the export, sale time plus `REMOVAL_GRACE_MINUTES` passed), which is the same for every
+lot a run removed; rejections carry their own reason per row. `available` is false only when
+an older run's removed lots cannot be reconstructed.
 
 ## Lot photos
 

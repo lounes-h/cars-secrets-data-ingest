@@ -3,7 +3,8 @@ import { queriesFor } from "./events";
 describe("queriesFor", () => {
   it("refreshes run data when a run finishes", () => {
     const keys = queriesFor({ type: "run_finished" }).map((k) => k[0]);
-    expect(keys).toEqual(expect.arrayContaining(["overview", "runs", "lots", "schema"]));
+    expect(keys).toEqual(
+      expect.arrayContaining(["overview", "runs", "run", "run-rows", "lots", "schema"]));
   });
 
   it("refreshes alerts and the overview on alert events", () => {
