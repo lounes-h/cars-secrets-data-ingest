@@ -31,10 +31,26 @@ export interface RunDetail {
     columns: string[] | null;
     field_errors: Record<string, number> | null;
     archived_path: string | null;
-    removed_lot_numbers: string[] | null;
   };
-  rejected_rows: { line_no: number; reason: string; raw: string[] }[];
   alerts: Pick<Alert, "id" | "severity" | "type" | "title" | "created_at" | "resolved_at">[];
+}
+
+/** The four lists a run produced; each is paged separately, they can hold 100k+ rows. */
+export type RunRowKind = "new" | "updated" | "removed" | "rejected";
+
+export interface RejectedRow {
+  line_no: number;
+  reason: string;
+  raw: string[];
+}
+
+export interface RunRows {
+  items: (RunLot | RejectedRow)[];
+  total: number;
+  /** False only when an older run's removed lots cannot be reconstructed. */
+  available: boolean;
+  /** Why these lots were removed; null for the other kinds (rejections say it per row). */
+  reason: string | null;
 }
 
 export interface Alert {
@@ -126,6 +142,12 @@ export interface Lot {
   removed_at: string | null;
 }
 
+export type RunLot = Pick<
+  Lot,
+  "source" | "lot_number" | "year" | "make" | "model_group" | "trim" | "vin" | "sale_status"
+  | "sale_at" | "yard_name" | "removed_at"
+>;
+
 export interface LotDetail {
   lot: Lot & {
     attributes: Record<string, string>;
@@ -215,6 +237,8 @@ export const api = {
     request<{ items: Run[]; total: number }>("GET", withParams("/api/runs", params)),
   run: (id: number) => request<RunDetail>("GET", `/api/runs/${id}`),
   retryRun: (id: number) => request<{ status: string; file: string }>("POST", `/api/runs/${id}/retry`),
+  runRows: (id: number, params: Params) =>
+    request<RunRows>("GET", withParams(`/api/runs/${id}/rows`, params)),
   alerts: (params?: Params) =>
     request<{ items: Alert[]; total: number }>("GET", withParams("/api/alerts", params)),
   ackAlert: (id: number) => request<Alert>("POST", `/api/alerts/${id}/ack`),

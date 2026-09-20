@@ -237,6 +237,12 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         finished_at, extract(epoch FROM finished_at - started_at)::float AS duration_seconds,
         rows_total, rows_new, rows_updated, rows_unchanged, rows_rejected, rows_removed,
         removal_skipped, error"""
+    RUN_LOT_COLUMNS = """l.source, l.lot_number, l.year, l.make, l.model_group, l.trim, l.vin,
+        l.sale_status, l.sale_at, l.yard_name, l.removed_at"""
+    REMOVAL_REASON = (
+        "Missing from this export, and its sale time plus the "
+        f"{settings.removal_grace_minutes}-minute grace period had passed, so bidding was over."
+    )
 
     @api.get("/runs")
     def runs(
@@ -257,36 +263,94 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     @api.get("/runs/{run_id}")
     def run_detail(run_id: int, conn: Conn) -> dict[str, Any]:
         run = conn.execute(
-            f"SELECT {RUN_COLUMNS}, columns, field_errors, archived_path, removed_lot_numbers "
+            f"SELECT {RUN_COLUMNS}, columns, field_errors, archived_path "
             "FROM ingest_files WHERE id = %s", (run_id,),
         ).fetchone()
         if run is None:
             raise HTTPException(404, "run not found")
-        if run["removed_lot_numbers"] is None and run["rows_removed"]:
-            # Older runs saved only counts. Recover a list only when every removal can
-            # be attributed to this run alone; reappearances can erase that evidence.
-            removed = conn.execute(
-                """SELECT lot_number FROM lots l
-                   WHERE l.source = %(source)s
-                     AND l.removed_at BETWEEN %(started_at)s AND %(finished_at)s
-                     AND NOT EXISTS (
-                         SELECT 1 FROM ingest_files f
-                         WHERE f.source = l.source AND f.id <> %(id)s
-                           AND f.status = 'succeeded'
-                           AND l.removed_at BETWEEN f.started_at AND f.finished_at)
-                   ORDER BY lot_number""", run,
-            ).fetchall()
-            if len(removed) == run["rows_removed"]:
-                run["removed_lot_numbers"] = [lot["lot_number"] for lot in removed]
-        rejected = conn.execute(
-            """SELECT line_no, reason, raw FROM rejected_rows WHERE file_id = %s
-               ORDER BY line_no LIMIT 200""", (run_id,),
-        ).fetchall()
         alerts = conn.execute(
             """SELECT id, severity, type, title, created_at, resolved_at FROM alerts
                WHERE file_id = %s ORDER BY id""", (run_id,),
         ).fetchall()
-        return {"run": run, "rejected_rows": rejected, "alerts": alerts}
+        return {"run": run, "alerts": alerts}
+
+    def removed_lot_numbers(conn: psycopg.Connection, run: dict) -> list[str] | None:
+        """The lots a run removed, or None when the list cannot be established."""
+        if run["removed_lot_numbers"] is not None or not run["rows_removed"]:
+            return run["removed_lot_numbers"] or []
+        # Older runs saved only counts. Recover a list only when every removal can
+        # be attributed to this run alone; reappearances can erase that evidence.
+        removed = conn.execute(
+            """SELECT lot_number FROM lots l
+               WHERE l.source = %(source)s
+                 AND l.removed_at BETWEEN %(started_at)s AND %(finished_at)s
+                 AND NOT EXISTS (
+                     SELECT 1 FROM ingest_files f
+                     WHERE f.source = l.source AND f.id <> %(id)s
+                       AND f.status = 'succeeded'
+                       AND l.removed_at BETWEEN f.started_at AND f.finished_at)
+               ORDER BY lot_number""", run,
+        ).fetchall()
+        if len(removed) != run["rows_removed"]:
+            return None
+        return [lot["lot_number"] for lot in removed]
+
+    @api.get("/runs/{run_id}/rows")
+    def run_rows(
+        run_id: int, conn: Conn, kind: Literal["new", "updated", "removed", "rejected"],
+        limit: Annotated[int, Query(ge=1, le=200)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        """One page of the lots a run created, changed or removed, or of its rejected rows.
+
+        `total` comes from the counts the load transaction wrote, except for rejected rows:
+        only the first `MAX_STORED_REJECTS` of those are kept, so they are counted.
+        `available` is false only when an older run's removed lots cannot be reconstructed.
+        """
+        run = conn.execute(
+            """SELECT id, source, started_at, finished_at, rows_new, rows_updated, rows_removed,
+                      removed_lot_numbers FROM ingest_files WHERE id = %s""", (run_id,),
+        ).fetchone()
+        if run is None:
+            raise HTTPException(404, "run not found")
+        page = {"limit": limit, "offset": offset, "id": run_id, "source": run["source"]}
+        if kind == "rejected":
+            items = conn.execute(
+                """SELECT line_no, reason, raw FROM rejected_rows WHERE file_id = %(id)s
+                   ORDER BY line_no LIMIT %(limit)s OFFSET %(offset)s""", page,
+            ).fetchall()
+            total = conn.execute(
+                "SELECT count(*) AS n FROM rejected_rows WHERE file_id = %s", (run_id,),
+            ).fetchone()["n"]
+            return {"items": items, "total": total, "available": True, "reason": None}
+        if kind == "new":
+            items = conn.execute(
+                f"""SELECT {RUN_LOT_COLUMNS} FROM lots l WHERE l.first_file_id = %(id)s
+                    ORDER BY l.lot_number LIMIT %(limit)s OFFSET %(offset)s""", page,
+            ).fetchall()
+            total = run["rows_new"]
+        elif kind == "updated":
+            # One lot_versions row is written per lot this run changed.
+            items = conn.execute(
+                f"""SELECT {RUN_LOT_COLUMNS} FROM lot_versions v
+                    JOIN lots l ON l.source = v.source AND l.lot_number = v.lot_number
+                    WHERE v.superseded_by_file_id = %(id)s
+                    ORDER BY v.lot_number LIMIT %(limit)s OFFSET %(offset)s""", page,
+            ).fetchall()
+            total = run["rows_updated"]
+        else:
+            numbers = removed_lot_numbers(conn, run)
+            if numbers is None:
+                return {"items": [], "total": run["rows_removed"] or 0, "available": False,
+                        "reason": REMOVAL_REASON}
+            items = conn.execute(
+                f"""SELECT {RUN_LOT_COLUMNS} FROM lots l
+                    WHERE l.source = %(source)s AND l.lot_number = ANY(%(page)s)
+                    ORDER BY l.lot_number""",
+                {**page, "page": numbers[offset:offset + limit]},
+            ).fetchall()
+            total = len(numbers)
+        return {"items": items, "total": total or 0, "available": True,
+                "reason": REMOVAL_REASON if kind == "removed" else None}
 
     @api.post("/runs/{run_id}/retry", status_code=202)
     def retry_run(run_id: int, conn: Conn) -> dict[str, str]:
