@@ -29,7 +29,6 @@ def test_parses_real_sample_and_rejects_shifted_rows():
     assert "special_note" not in attributes  # empty values are dropped
 
 
-
 def test_offsite_address_is_mapped(tmp_path):
     header, rows = read_sample()
     rows = rows[:2]
@@ -42,6 +41,7 @@ def test_offsite_address_is_mapped(tmp_path):
             ("offsite_address", "offsite_city", "offsite_state", "offsite_zip")] == [
         "645 W UNION ST", "ALLENTOWN", "PA", "18101"]
     assert on_yard.values[COLUMN_INDEX["offsite_address"]] is None
+
 
 def test_empty_file_is_rejected(tmp_path):
     path = tmp_path / "empty.csv"
