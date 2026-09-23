@@ -13,7 +13,8 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 - **Frontend** (`frontend/`): React 19 + TypeScript, Vite, TanStack Query, React Router,
   Recharts. Served by nginx, which also proxies `/api`.
 - **Runtime**: Docker Compose — `db`, `migrate` (one-shot), `worker`, `api`, `web`.
-- **Tests**: pytest + testcontainers (real Postgres), Vitest + Testing Library.
+- **Tests**: pytest + testcontainers (real Postgres), Vitest + Testing Library; 95 % minimum
+  coverage on both.
 
 ## Commands
 
@@ -28,12 +29,14 @@ python3 scripts/simulate_export.py   # drop a realistic "next hour" export into 
 # backend (from backend/)
 uv sync                         # create .venv with dev dependencies
 .venv/bin/pytest                # all tests; starts a throwaway Postgres via Docker
+.venv/bin/pytest --cov          # the same, failing below 95 % coverage
 TEST_DATABASE_URL=postgresql://… .venv/bin/pytest   # reuse an existing Postgres (it is wiped)
 .venv/bin/ruff check ingest tests migrations
 
 # frontend (from frontend/)
 npm ci
 npm test                        # vitest
+npm run test:coverage           # the same, failing below 95 % coverage
 npm run typecheck
 npm run build
 npm run dev                     # dev server on :5173, proxies /api to localhost:8000
@@ -146,6 +149,16 @@ semantics that SQLite does not share.
 
 `backend/tests/fixtures/sample.csv` holds 300 real Copart rows plus 2 malformed (shifted)
 rows; build variations with `make_export` in `conftest.py` rather than adding fixtures.
+
+**Minimum test coverage is 95 %**, for the backend and the frontend alike. The backend's
+`.venv/bin/pytest --cov` fails below it (lines and branches of `ingest/`, `fail_under` in
+`pyproject.toml`); coverage follows greenlets, because Playwright runs the downloader's page
+code in them. The downloader's browser tests drive the installed Google Chrome and skip where
+it is missing, which leaves the backend short of 95 %: measure on a machine with Chrome. The
+frontend's `npm run test:coverage` fails when statements, branches, functions or lines of
+`src/` fall below it (thresholds in `vite.config.ts`). There is no CI in this repository, so
+run both before committing. Cover new code in the same change; never lower a threshold or
+exclude code to get a change through.
 
 ## Unit Test Requirements
 

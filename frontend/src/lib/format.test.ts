@@ -1,4 +1,4 @@
-import { ago, bytes, compact, duration, int, money } from "./format";
+import { ago, bytes, clockTime, compact, dateTime, duration, int, money } from "./format";
 
 describe("format", () => {
   it("compacts only large numbers", () => {
@@ -30,5 +30,12 @@ describe("format", () => {
     expect(money("100", "CAD")).toBe("CA$100");
     expect(money(null, "USD")).toBe("—");
     expect(money("N/A", "USD")).toBe("N/A");
+    expect(money("5", null)).toBe("$5");
+  });
+
+  it("shows a dash for a missing size or time", () => {
+    expect(bytes(null)).toBe("—");
+    expect(dateTime(null)).toBe("—");
+    expect(clockTime(undefined)).toBe("—");
   });
 });

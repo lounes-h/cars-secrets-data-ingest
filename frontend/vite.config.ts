@@ -12,5 +12,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
+    // `npm run test:coverage` fails below 95 % on any metric (see CLAUDE.md, Tests).
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,tsx}"],
+      thresholds: { statements: 95, branches: 95, functions: 95, lines: 95 },
+    },
   },
 });

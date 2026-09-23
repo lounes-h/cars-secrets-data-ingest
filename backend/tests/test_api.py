@@ -1,9 +1,15 @@
+import asyncio
+import contextlib
 import dataclasses
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ingest.api.app import TTLCache, create_app, diff_attributes
+from ingest.api import app as app_module
+from ingest.api import auth
+from ingest.api.app import EventBroker, TTLCache, create_app, diff_attributes, monitor_loop
+from ingest.db import EVENTS_CHANNEL
 from ingest.pipeline import process_file
 from ingest.providers import COPART, PROVIDERS, LotImage, LotImages
 
@@ -310,3 +316,182 @@ def test_overview_reports_downloader_and_counts_it_in_health(authed, conn):
 def test_downloader_status_requires_login(client):
     assert client.get("/api/downloader").status_code == 401
     assert client.post("/api/downloader/run").status_code == 401
+
+
+def test_retry_refuses_a_missing_run_an_unknown_provider_and_a_file_already_queued(
+        authed, conn, settings, make_export):
+    assert authed.post("/api/runs/999/retry").status_code == 404
+
+    kept = settings.failed_dir / "iaai" / "1_x.csv"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("x")
+    file_id = conn.execute(
+        """INSERT INTO ingest_files (source, filename, sha256, status, archived_path)
+           VALUES ('iaai', 'x.csv', 'x', 'failed', %s) RETURNING id""", (str(kept),),
+    ).fetchone()["id"]
+    r = authed.post(f"/api/runs/{file_id}/retry")
+    assert r.status_code == 409 and "unknown provider" in r.json()["detail"]
+
+    path = make_export(header=["nothing", "useful"], rows=[["1", "2"]], name="bad.csv")
+    outcome = process_file(conn, path, COPART, settings)
+    make_export(header=["nothing", "useful"], rows=[["1", "2"]], name="bad.csv")  # dropped again
+    r = authed.post(f"/api/runs/{outcome.file_id}/retry")
+    assert r.status_code == 409 and "already waiting" in r.json()["detail"]
+
+
+def test_alert_and_lot_filters(authed, conn, settings, make_export):
+    header, rows = read_sample()
+    process_file(conn, make_export(rows), COPART, settings)
+    alerts = authed.get("/api/alerts", params={"state": "all", "severity": "critical"})
+    assert alerts.status_code == 200
+    assert len(authed.get("/api/lots", params={"state": "active", "limit": 5}).json()["items"]) == 5
+    assert authed.get("/api/lots", params={"state": "removed"}).json()["items"] == []
+    make = rows[0][header.index("Make")]
+    found = authed.get("/api/lots", params={"q": f" {make} "}).json()["items"]
+    assert found and all(lot["make"] == make for lot in found)
+
+
+def test_lot_images_of_a_provider_without_a_photo_api(authed, conn, settings, make_export,
+                                                     monkeypatch):
+    header, rows = read_sample()
+    process_file(conn, make_export(rows), COPART, settings)
+    monkeypatch.setitem(PROVIDERS, "copart", dataclasses.replace(COPART, fetch_images=None))
+    lot_number = rows[0][header.index("Lot number")]
+    assert authed.get(f"/api/lots/copart/{lot_number}/images").json() == {
+        "images": [], "complete": False}
+
+
+def test_app_factory_reads_the_environment(settings, monkeypatch):
+    monkeypatch.setattr(app_module, "get_settings", lambda: settings)
+    assert app_module.app_factory().title == "Ingest dashboard API"
+
+
+def test_background_tasks_start_and_stop_with_the_app(conn, settings):
+    with TestClient(create_app(settings)) as c:
+        assert c.get("/api/health").status_code == 200
+
+
+def test_broker_fans_out_and_drops_events_for_a_full_stream():
+    broker = EventBroker()
+    fast, full = asyncio.Queue(), asyncio.Queue(maxsize=1)
+    full.put_nowait("old")
+    broker.subscribers |= {fast, full}
+    broker.publish("new")
+    assert fast.get_nowait() == "new"
+    assert full.get_nowait() == "old" and full.empty()
+
+
+def test_broker_relays_database_notifications(conn, db_url):
+    async def scenario():
+        broker = EventBroker()
+        queue = asyncio.Queue()
+        broker.subscribers.add(queue)
+        task = asyncio.create_task(broker.listen(db_url))
+        try:
+            while queue.empty():  # until LISTEN is in place
+                conn.execute("SELECT pg_notify(%s, %s)", (EVENTS_CHANNEL, "hello"))
+                await asyncio.sleep(0.05)
+            return await queue.get()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert asyncio.run(asyncio.wait_for(scenario(), 20)) == "hello"
+
+
+def test_broker_reconnects_after_a_failure(monkeypatch):
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        raise asyncio.CancelledError  # stop after the first reconnect pause
+
+    monkeypatch.setattr(app_module, "asyncio", SimpleNamespace(
+        sleep=sleep, CancelledError=asyncio.CancelledError))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(EventBroker().listen("postgresql://nobody@127.0.0.1:1/none"))
+    assert waits == [3]
+
+
+def test_monitor_checks_every_round_survives_errors_and_notices_sleep(settings, monkeypatch):
+    seen, waits = [], []
+    clock = iter([0.0, 10.0, 10_000.0])
+
+    def checks(_conn, _settings, after_sleep):
+        seen.append(after_sleep)
+        if len(seen) == 1:
+            raise RuntimeError("database hiccup")
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 3:
+            raise asyncio.CancelledError
+
+    class Pool:
+        @contextlib.contextmanager
+        def connection(self):
+            yield None
+
+    monkeypatch.setattr(app_module, "run_checks", checks)
+    monkeypatch.setattr(app_module, "time", SimpleNamespace(time=lambda: next(clock)))
+    monkeypatch.setattr(app_module, "asyncio", SimpleNamespace(
+        sleep=sleep, to_thread=asyncio.to_thread, CancelledError=asyncio.CancelledError))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(monitor_loop(Pool(), settings))
+    assert seen == [False, False, True]  # a gap of over three rounds means the machine slept
+    assert waits == [settings.monitor_interval_seconds] * 3
+
+
+def test_event_stream_relays_events_and_keeps_alive_until_the_browser_leaves(settings,
+                                                                            monkeypatch):
+    brokers = []
+
+    class Capturing(EventBroker):
+        def __init__(self):
+            super().__init__()
+            brokers.append(self)
+
+    real_wait_for = asyncio.wait_for
+
+    async def quick_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, 0.05)
+
+    monkeypatch.setattr(app_module, "EventBroker", Capturing)
+    monkeypatch.setattr(app_module.asyncio, "wait_for", quick_wait_for)
+    app = create_app(settings, background=False)
+    app.dependency_overrides[auth.current_user] = lambda: "admin"
+
+    async def scenario():
+        """One browser on the stream, over plain ASGI: it leaves after the first keep-alive."""
+        left = asyncio.Event()
+        chunks = []
+        received = False
+
+        async def receive():
+            nonlocal received
+            if not received:
+                received = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await left.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                chunks.append(message["body"].decode())
+                if len(chunks) == 1:
+                    brokers[0].publish('{"type":"run_finished"}')
+                if chunks[-1].startswith(": keep-alive"):
+                    left.set()
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "GET", "scheme": "http", "path": "/api/events",
+                 "raw_path": b"/api/events", "root_path": "", "query_string": b"",
+                 "headers": [], "client": ("test", 1), "server": ("test", 80)}
+        await real_wait_for(app(scope, receive, send), 10)
+        return chunks
+
+    chunks = asyncio.run(scenario())
+    assert chunks[:3] == [
+        "retry: 3000\n\n", 'data: {"type":"run_finished"}\n\n', ": keep-alive\n\n"]
+    assert brokers[0].subscribers == set()
