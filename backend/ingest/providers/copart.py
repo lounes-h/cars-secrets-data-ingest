@@ -195,6 +195,11 @@ COPART = Provider(
         _f("location_state", to_text),
         _f("location_zip", to_text),
         _f("location_country", to_text),
+        # Filled only when the lot is held away from the yard (seen: ~1 % of lots).
+        _f("offsite_address", to_text, "offsite_address1"),
+        _f("offsite_city", to_text),
+        _f("offsite_state", to_text),
+        _f("offsite_zip", to_text),
         _f("seller_name", to_text),
         _f("image_url", to_text),
         _f("thumbnail_url", to_https_url, "image_thumbnail"),
