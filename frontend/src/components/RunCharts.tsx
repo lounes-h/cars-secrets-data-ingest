@@ -48,7 +48,7 @@ export function toPoints(runs: Run[]): Point[] {
     }));
 }
 
-function ChangesTooltip({ active, payload }: { active?: boolean; payload?: { payload: Point }[] }) {
+export function ChangesTooltip({ active, payload }: { active?: boolean; payload?: { payload: Point }[] }) {
   if (!active || !payload?.length) return null;
   const p = payload[0].payload;
   return (
@@ -65,7 +65,7 @@ function ChangesTooltip({ active, payload }: { active?: boolean; payload?: { pay
   );
 }
 
-function DurationTooltip({ active, payload }: { active?: boolean; payload?: { payload: Point }[] }) {
+export function DurationTooltip({ active, payload }: { active?: boolean; payload?: { payload: Point }[] }) {
   if (!active || !payload?.length) return null;
   const p = payload[0].payload;
   return (

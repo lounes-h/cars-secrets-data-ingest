@@ -2,8 +2,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
-import { api, type RunDetail, type RunLot, type RunRows } from "../lib/api";
-import { RunDetailPage } from "./Runs";
+import { ToastProvider } from "../components/Toasts";
+import { api, type Run, type RunDetail, type RunLot, type RunRows } from "../lib/api";
+import { RunDetailPage, RunsPage } from "./Runs";
 
 const detail: RunDetail = {
   run: {
@@ -107,4 +108,119 @@ it("shows an empty list rather than a pager when a run changed nothing", async (
     { ...detail.run, rows_new: 0, rows_updated: 0, rows_removed: 0, rows_rejected: 0 });
   expect(await screen.findByText("No new lots.")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
+});
+
+it("shows everything a failed run left behind and puts its file back on retry", async () => {
+  const failed = {
+    ...detail.run, status: "failed" as const, archived_path: "failed/export.csv", error: "bad header",
+    rows_removal_deferred: 4, field_errors: { odometer: 3 }, columns: ["Lot number", "VIN"],
+    removal_skipped: Array.from({ length: 13 }, (_, i) => `YARD ${i}`),
+  };
+  vi.spyOn(api, "run").mockResolvedValue({
+    run: failed,
+    alerts: [
+      { id: 1, severity: "critical", type: "file_failed", title: "Export failed", created_at: "", resolved_at: null },
+      { id: 2, severity: "info", type: "yard", title: "Yard skipped", created_at: "", resolved_at: "2026-09-19T12:00:00Z" },
+    ],
+  });
+  vi.spyOn(api, "runRows").mockImplementation((_id, params) => Promise.resolve(pages[String(params.kind)]));
+  const retry = vi.spyOn(api, "retryRun")
+    .mockRejectedValueOnce(new Error("File is gone"))
+    .mockResolvedValue({ status: "queued", file: "export.csv" });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <ToastProvider>
+        <MemoryRouter initialEntries={["/runs/42"]}>
+          <Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes>
+        </MemoryRouter>
+      </ToastProvider>
+    </QueryClientProvider>,
+  );
+
+  expect(await screen.findByText("bad header")).toBeInTheDocument();
+  expect(screen.getByText("4 lots (auction not over yet)")).toBeInTheDocument();
+  expect(screen.getByText(/13 yard\(s\): YARD 0, .*YARD 11…/)).toBeInTheDocument();
+  expect(screen.getByText("odometer: 3")).toBeInTheDocument();
+  expect(screen.getByText("Export failed")).toBeInTheDocument();
+  expect(screen.getByText("resolved")).toBeInTheDocument();
+  expect(screen.getByText("2 columns in this file")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry this file" }));
+  expect(await screen.findByText("File is gone")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry this file" }));
+  expect(await screen.findByText("export.csv is back in the inbox and will be ingested again."))
+    .toBeInTheDocument();
+  expect(retry).toHaveBeenCalledWith(42);
+});
+
+it("cuts long rejected rows short and opens a lot from its row", async () => {
+  const raw = Array.from({ length: 13 }, (_, i) => `v${i}`);
+  const nameless = { ...lot("555"), year: null, make: null, model_group: null };
+  show({
+    ...pages,
+    new: { ...pages.new, items: [...pages.new.items, nameless] },
+    rejected: { items: [{ line_no: 9, reason: "too many fields", raw }], total: 1200, available: true, reason: null },
+  }, { ...detail.run, field_errors: null });
+  fireEvent.click(await screen.findByRole("button", { name: "Rejected (1,200)" }));
+  expect(await screen.findByText(/v11 \| …$/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "New (60)" }));
+  fireEvent.click((await screen.findAllByText("2013 ACURA ILX"))[0]);
+  // The lot's page is not routed here, so leaving the run page is the navigation.
+  await waitFor(() => expect(screen.queryByText("What this run did")).toBeNull());
+});
+
+it("shows the load error of a run", async () => {
+  vi.spyOn(api, "run").mockRejectedValue(new Error("Run not found"));
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MemoryRouter initialEntries={["/runs/1"]}>
+        <Routes><Route path="/runs/:id" element={<RunDetailPage />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("Run not found")).toBeInTheDocument();
+});
+
+it("says so when a run rejected no row or removed no lot", async () => {
+  const empty: RunRows = { items: [], total: 0, available: true, reason: null };
+  show({ ...pages, rejected: empty, removed: empty });
+  fireEvent.click(await screen.findByRole("button", { name: "Rejected (1,200)" }));
+  expect(await screen.findByText("No rejected rows.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Removed (2)" }));
+  expect(await screen.findByText("No removed lots.")).toBeInTheDocument();
+});
+
+describe("runs list", () => {
+  function list(items: Run[], total = items.length) {
+    vi.spyOn(api, "downloader").mockResolvedValue({ installed: false, status: "not_installed" });
+    const runs = vi.spyOn(api, "runs").mockResolvedValue({ items, total });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/runs"]}>
+          <Routes>
+            <Route path="/runs" element={<RunsPage />} />
+            <Route path="/runs/:id" element={<p>run page</p>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    return runs;
+  }
+
+  it("lists runs, filters by status and opens a run on click", async () => {
+    const runs = list([detail.run]);
+    expect(await screen.findByRole("link", { name: "42" })).toHaveAttribute("href", "/runs/42");
+    expect(screen.getByText("export.csv")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Failed" }));
+    await waitFor(() => expect(runs).toHaveBeenLastCalledWith({ status: "failed", limit: 50, offset: 0 }));
+    fireEvent.click(await screen.findByText("export.csv"));
+    expect(await screen.findByText("run page")).toBeInTheDocument();
+  });
+
+  it("says when there are no runs", async () => {
+    list([]);
+    expect(await screen.findByText("No runs yet.")).toBeInTheDocument();
+    expect(await screen.findByText("not set up")).toBeInTheDocument();
+  });
 });

@@ -448,3 +448,89 @@ def test_pause_is_published(dsettings, conn):
     row = conn.execute("SELECT needs_attention, next_allowed_at FROM downloader_status"
                        ).fetchone()
     assert row == {"needs_attention": "challenge", "next_allowed_at": None}
+
+
+def test_login_lifts_the_pause_and_resolves_its_alert(dsettings, conn, monkeypatch):
+    import ingest.downloader.browser as browser
+
+    State(needs_attention="challenge", consecutive_failures=2).save(dsettings.state_file)
+    cli.notify(dsettings, cli.AlertSpec("critical", "downloader_attention", "Log in",
+                                        cli.FP_ATTENTION))
+    monkeypatch.setattr(browser, "interactive_login", lambda settings: True)
+    assert cli.login(dsettings) == cli.OK
+    state = State.load(dsettings.state_file)
+    assert state.needs_attention is None and state.consecutive_failures == 0
+    open_alerts = conn.execute("SELECT count(*) AS n FROM alerts WHERE resolved_at IS NULL")
+    assert open_alerts.fetchone()["n"] == 0
+
+
+def test_login_waits_for_a_download_in_progress(dsettings, monkeypatch):
+    from ingest.downloader.core import download_lock
+
+    with download_lock(dsettings.lock_file):
+        assert cli.login(dsettings) == cli.BUSY
+
+
+def test_status_prints_the_pacing(dsettings, conn, capsys):
+    assert cli.status(dsettings) == cli.OK
+    out = capsys.readouterr().out
+    assert "last attempt:  never" in out and "failures:      0 in a row" in out
+
+
+def test_a_dashboard_database_that_is_down_never_fails_the_downloader(tmp_path):
+    settings = DownloaderSettings(_env_file=None, state_file=tmp_path / "s.json",
+                                  database_url="postgresql://nobody@127.0.0.1:1/none")
+    cli.save(settings, State())  # logged, not raised
+    cli.notify(settings, None, resolve=(cli.FP_FAILED,))
+    assert State.load(settings.state_file) == State()
+
+
+def test_download_requests_need_the_database(tmp_path):
+    settings = DownloaderSettings(_env_file=None, state_file=tmp_path / "s.json")
+    assert cli.read_request(settings) is None
+    cli.clear_request(settings, T0)  # nothing to clear
+
+
+def test_run_uses_the_real_browser_by_default(dsettings, conn, monkeypatch):
+    import ingest.downloader.browser as browser
+
+    monkeypatch.setattr(browser, "download", fetch_returning(PageState.READY, SAMPLE))
+    assert cli.run_once(dsettings, force=True, now=Clock()) == cli.OK
+
+
+@pytest.mark.parametrize("argv, called", [
+    (["login"], "login"), (["status"], "status"),
+    (["daemon", "--every", "60", "--jitter", "0"], "run_daemon"),
+    (["run", "--force"], "run_locked"),
+])
+def test_main_runs_the_chosen_command(argv, called, monkeypatch, tmp_path):
+    calls = []
+    for name in ("login", "status", "run_daemon", "run_locked"):
+        monkeypatch.setattr(cli, name, lambda *a, _name=name, **kw: calls.append((_name, kw)) or 0)
+    monkeypatch.setattr(cli, "DownloaderSettings", lambda: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(argv) == cli.OK
+    assert [c[0] for c in calls] == [called]
+    if called == "run_daemon":
+        assert calls[0][1] == {"every": 60, "jitter": 0}
+    if called == "run_locked":
+        assert calls[0][1] == {"force": True}
+
+
+def test_daemon_wires_the_process_to_the_database_and_stops_on_sigterm(dsettings, conn,
+                                                                       monkeypatch):
+    import ingest.downloader.daemon as daemon_module
+
+    handlers, served = {}, []
+    monkeypatch.setattr(cli.signal, "signal", lambda sig, fn: handlers.setdefault(sig, fn))
+    monkeypatch.setattr(daemon_module, "serve", lambda daemon, stop: served.append((daemon, stop)))
+    monkeypatch.setattr(cli, "run_locked", lambda settings, force: 7)
+    assert cli.run_daemon(dsettings, every=3600, jitter=0) == cli.OK
+    daemon, stop = served[0]
+    assert daemon.run(True) == 7
+    daemon.publish(State(), heartbeat=True)
+    assert daemon.read_request() is None
+    daemon.clear_request(T0)
+    handlers[cli.signal.SIGTERM]()
+    assert stop.is_set()

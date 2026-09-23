@@ -216,3 +216,20 @@ def test_failures_push_the_plan_back(tmp_path, failures, hours):
     h.daemon.start()
     h.daemon.tick()
     assert h.state().next_run_at == (T0 + timedelta(hours=hours)).isoformat()
+
+
+def test_serve_keeps_going_after_a_failed_tick(tmp_path, monkeypatch):
+    h = Harness(tmp_path)
+    stop = threading.Event()
+    ticks = []
+
+    def tick():
+        ticks.append(1)
+        if len(ticks) == 2:
+            stop.set()
+        raise OSError("database briefly down")
+
+    monkeypatch.setattr(h.daemon, "tick", tick)
+    serve(h.daemon, stop, poll_seconds=0)
+    assert len(ticks) == 2
+    assert h.published[-1][1] == {"heartbeat": False, "stopped": True}

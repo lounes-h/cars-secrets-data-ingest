@@ -25,6 +25,7 @@ dev = [
     "httpx>=0.27",
     "testcontainers[postgres]>=4.8",
     "ruff>=0.6",
+    "pytest-cov>=7.1.0",
 ]
 
 [build-system]
@@ -44,3 +45,14 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.coverage.run]
+source = ["ingest"]
+branch = true
+# Playwright's sync API runs page code in greenlets, which coverage only follows when told to.
+concurrency = ["thread", "greenlet"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+skip_covered = true

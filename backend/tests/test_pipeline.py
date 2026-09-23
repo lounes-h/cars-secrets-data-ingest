@@ -330,3 +330,35 @@ def test_successful_or_duplicate_ingest_resolves_staleness_alert(conn, settings,
     raise_alert(conn, stale)
     assert ingest(conn, make_export(), settings).status == "duplicate"
     assert "no_new_file" not in open_alerts(conn)
+
+
+def test_a_file_that_cannot_be_archived_is_loaded_and_alerted(conn, settings, make_export,
+                                                              monkeypatch):
+    from ingest import files
+
+    def full_disk(*_args):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(files, "archive", full_disk)
+    outcome = ingest(conn, make_export(), settings)
+    assert outcome.status == "succeeded"
+    assert run(conn, outcome.file_id)["archived_path"] is None
+    assert "No space left" in open_alerts(conn)["archive_failed"]["title"]
+
+
+def test_a_rejected_file_that_cannot_be_moved_still_fails_cleanly(conn, settings, make_export,
+                                                                 monkeypatch):
+    from ingest import files
+
+    header, rows = read_sample()
+    key = col(header, "Lot number")
+    path = make_export([r[:key] + r[key + 1:] for r in rows],
+                       header=header[:key] + header[key + 1:])
+
+    def read_only(*_args):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr(files, "move_to", read_only)
+    outcome = ingest(conn, path, settings)
+    assert outcome.status == "failed"
+    assert path.exists()  # left where it was, with the failure recorded

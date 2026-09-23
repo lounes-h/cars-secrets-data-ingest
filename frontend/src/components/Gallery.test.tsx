@@ -24,6 +24,19 @@ describe("Gallery", () => {
     expect(main().src).toBe(images[1].full); // wraps around
   });
 
+  it("steps back with the button and falls back to whatever size a photo has", () => {
+    render(<Gallery images={[
+      { thumb: "t0", full: null, hd: "h0" },
+      { thumb: null, full: "f1", hd: null },
+      { thumb: "t2", full: null, hd: null },
+    ]} alt="lot" />);
+    const main = () => screen.getByAltText(/lot, photo/) as HTMLImageElement;
+    expect(main().getAttribute("src")).toBe("h0");
+    fireEvent.click(screen.getByLabelText("Previous photo"));
+    expect(main().getAttribute("src")).toBe("t2");
+    expect(screen.getByLabelText("Photo 2").querySelector("img")?.getAttribute("src")).toBe("f1");
+  });
+
   it("says so when there are no photos", () => {
     render(<Gallery images={[]} alt="x" />);
     expect(screen.getByText("No photos for this lot.")).toBeInTheDocument();

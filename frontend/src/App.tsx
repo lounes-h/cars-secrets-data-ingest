@@ -25,8 +25,8 @@ export function App() {
 
   const logout = async () => {
     await api.logout();
-    qc.clear();
-    qc.invalidateQueries({ queryKey: ["me"] });
+    // Reset, not clear: clearing detached the mounted "me" query, so the dashboard stayed up.
+    qc.resetQueries();
   };
 
   return (

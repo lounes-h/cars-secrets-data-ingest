@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
-import { api, type Overview } from "../lib/api";
+import { api, type Lot, type LotDetail, type Overview } from "../lib/api";
 import { LotDetailPage, LotsPage } from "./Lots";
 
 afterEach(() => vi.restoreAllMocks());
@@ -76,5 +76,121 @@ describe("lot detail", () => {
       </QueryClientProvider>,
     );
     expect(screen.getByRole("link", { name: /Lots/ })).toHaveAttribute("href", "/lots");
+  });
+});
+
+const lot: Lot = {
+  source: "copart", lot_number: "68264956", year: 2013, make: "ACURA", model_group: "TSX",
+  model_detail: "TSX TECH", trim: "TECH", vin: "JH4CU2F65DC010051", damage_primary: "FRONT END",
+  damage_secondary: "REAR END", odometer: "123456", est_retail_value: "9800", repair_cost: null,
+  high_bid: "1500", buy_it_now_price: null, currency: "USD", sale_status: "Pure Sale",
+  sale_at: "2026-09-20T15:00:00Z", yard_code: "1", yard_name: "CA - VALLEJO",
+  location_city: "VALLEJO", location_state: "CA", thumbnail_url: "https://cs.copart.com/a_thb.jpg",
+  first_seen_at: "2026-09-15T10:00:00Z", last_seen_at: "2026-09-19T10:00:00Z",
+  last_changed_at: "2026-09-18T10:00:00Z", removed_at: null,
+};
+const bare: Lot = {
+  ...lot, lot_number: "41633106", year: null, model_group: null, vin: null, damage_primary: null,
+  odometer: null, high_bid: null, yard_name: null, thumbnail_url: null,
+  removed_at: "2026-09-19T11:00:00Z",
+};
+
+describe("lot list", () => {
+  function list(items: Lot[]) {
+    vi.spyOn(api, "overview").mockRejectedValue(new Error("Unavailable"));
+    const lots = vi.spyOn(api, "lots").mockResolvedValue({ items });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/lots"]}>
+          <Routes>
+            <Route path="/lots" element={<LotsPage />} />
+            <Route path="/lots/:source/:lotNumber" element={<p>detail page</p>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    return lots;
+  }
+
+  it("shows each lot with dashes for what the auction left out, and opens a lot on click", async () => {
+    list([lot, bare]);
+    expect(await screen.findByRole("link", { name: "68264956" })).toHaveAttribute("href", "/lots/copart/68264956");
+    expect(screen.getByText("2013 ACURA TSX")).toBeInTheDocument();
+    expect(screen.getByText("123,456")).toBeInTheDocument();
+    expect(screen.getByText("$1,500")).toBeInTheDocument();
+    expect(screen.getByText("active")).toBeInTheDocument();
+    expect(screen.getByText("removed")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThan(3);
+    fireEvent.click(screen.getByText("2013 ACURA TSX"));
+    expect(await screen.findByText("detail page")).toBeInTheDocument();
+  });
+
+  it("pages forward while a page is full, and back", async () => {
+    const lots = list(Array.from({ length: 50 }, (_, i) => ({ ...lot, lot_number: String(i) })));
+    fireEvent.click(await screen.findByRole("button", { name: "Next" }));
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 50 }));
+    fireEvent.click(await screen.findByRole("button", { name: "Previous" }));
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 0 }));
+  });
+});
+
+describe("lot detail page", () => {
+  const detail: LotDetail = {
+    lot: {
+      ...lot, attributes: { "Lot number": "68264956", Color: "BLACK" }, first_file_id: 1,
+      last_file_id: 9, listing_url: "https://www.copart.com/lot/68264956",
+    },
+    history: [
+      { changed_at: "2026-09-18T10:00:00Z", file_id: 8, changes: [{ field: "high_bid", old: null, new: "1500" }] },
+      { changed_at: "2026-09-17T10:00:00Z", file_id: null, changes: [{ field: "sale_status", old: "On Minimum Bid", new: null }] },
+    ],
+  };
+
+  function open(data: LotDetail, images = { images: [], complete: true }) {
+    vi.spyOn(api, "lot").mockResolvedValue(data);
+    vi.spyOn(api, "lotImages").mockResolvedValue(images);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/lots/copart/68264956"]}>
+          <Routes><Route path="/lots/:source/:lotNumber" element={<LotDetailPage />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("shows the lot, its link to the auction, its history and every source value", async () => {
+    open(detail);
+    expect(await screen.findByRole("heading", { name: /2013 ACURA TSX TSX TECH · lot 68264956/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View on Copart ↗" })).toHaveAttribute("href", detail.lot.listing_url);
+    expect(screen.getByText("FRONT END / REAR END")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "run #8" })).toHaveAttribute("href", "/runs/8");
+    expect(screen.getAllByText(/∅/)).toHaveLength(2);
+    expect(screen.getByText("All 2 source values")).toBeInTheDocument();
+    expect(await screen.findByText("No photos for this lot.")).toBeInTheDocument();
+  });
+
+  it("marks a removed lot and names another auction as it is", async () => {
+    open({
+      ...detail,
+      lot: { ...detail.lot, source: "iaai", removed_at: "2026-09-19T11:00:00Z", odometer: null,
+        vin: null, damage_primary: null, damage_secondary: null, sale_status: null, yard_name: null },
+      history: [],
+    });
+    expect(await screen.findByText(/^removed /)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View on iaai ↗" })).toBeInTheDocument();
+    expect(screen.getByText("Unchanged since first seen.")).toBeInTheDocument();
+  });
+
+  it("shows the load error under the back link", async () => {
+    vi.spyOn(api, "lot").mockRejectedValue(new Error("Lot not found"));
+    vi.spyOn(api, "lotImages").mockResolvedValue({ images: [], complete: true });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/lots/copart/1"]}>
+          <Routes><Route path="/lots/:source/:lotNumber" element={<LotDetailPage />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Lot not found")).toBeInTheDocument();
   });
 });

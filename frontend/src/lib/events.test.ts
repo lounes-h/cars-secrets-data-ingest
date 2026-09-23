@@ -13,4 +13,9 @@ describe("queriesFor", () => {
       expect(keys).toEqual(expect.arrayContaining(["overview", "alerts"]));
     }
   });
+
+  it("refreshes the downloader card on downloader events, and the overview on anything else", () => {
+    expect(queriesFor({ type: "downloader" })).toEqual([["downloader"], ["overview"]]);
+    expect(queriesFor({ type: "unknown" as never })).toEqual([["overview"]]);
+  });
 });
