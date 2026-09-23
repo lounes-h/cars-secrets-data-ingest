@@ -29,6 +29,20 @@ def test_parses_real_sample_and_rejects_shifted_rows():
     assert "special_note" not in attributes  # empty values are dropped
 
 
+
+def test_offsite_address_is_mapped(tmp_path):
+    header, rows = read_sample()
+    rows = rows[:2]
+    for col, value in (("Offsite Address1", "645 W UNION ST"), ("Offsite City", "ALLENTOWN"),
+                       ("Offsite State", "PA"), ("Offsite Zip", "18101")):
+        rows[0][header.index(col)] = value
+    with CsvFile(write_csv(tmp_path / "x.csv", header, rows), COPART) as f:
+        offsite, on_yard = list(f.rows())
+    assert [offsite.values[COLUMN_INDEX[c]] for c in
+            ("offsite_address", "offsite_city", "offsite_state", "offsite_zip")] == [
+        "645 W UNION ST", "ALLENTOWN", "PA", "18101"]
+    assert on_yard.values[COLUMN_INDEX["offsite_address"]] is None
+
 def test_empty_file_is_rejected(tmp_path):
     path = tmp_path / "empty.csv"
     path.write_text("")
