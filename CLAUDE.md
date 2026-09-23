@@ -27,7 +27,7 @@ python3 scripts/simulate_export.py   # drop a realistic "next hour" export into 
 (cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
 # backend (from backend/)
-uv sync                         # create .venv with dev dependencies
+uv sync --extra downloader      # create .venv with dev dependencies and Playwright
 .venv/bin/pytest                # all tests; starts a throwaway Postgres via Docker
 .venv/bin/pytest --cov          # the same, failing below 95 % coverage
 TEST_DATABASE_URL=postgresql://… .venv/bin/pytest   # reuse an existing Postgres (it is wiped)
@@ -41,6 +41,10 @@ npm run typecheck
 npm run build
 npm run dev                     # dev server on :5173, proxies /api to localhost:8000
 ```
+
+GitHub Actions runs the backend's ruff and `pytest --cov` (against a Postgres 17 service) and
+the frontend's typecheck, `test:coverage` and build on every pull request and on pushes to
+`main` (`.github/workflows/ci.yml`).
 
 ## Architecture rules (important)
 
@@ -153,12 +157,12 @@ rows; build variations with `make_export` in `conftest.py` rather than adding fi
 **Minimum test coverage is 95 %**, for the backend and the frontend alike. The backend's
 `.venv/bin/pytest --cov` fails below it (lines and branches of `ingest/`, `fail_under` in
 `pyproject.toml`); coverage follows greenlets, because Playwright runs the downloader's page
-code in them. The downloader's browser tests drive the installed Google Chrome and skip where
-it is missing, which leaves the backend short of 95 %: measure on a machine with Chrome. The
-frontend's `npm run test:coverage` fails when statements, branches, functions or lines of
-`src/` fall below it (thresholds in `vite.config.ts`). There is no CI in this repository, so
-run both before committing. Cover new code in the same change; never lower a threshold or
-exclude code to get a change through.
+code in them. The downloader's browser tests need Playwright (`uv sync --extra downloader`;
+a plain `uv sync` removes it) and drive the installed Google Chrome; without either they skip
+and leave the backend short of 95 %. CI has both. The frontend's `npm run test:coverage` fails
+when statements, branches, functions or lines of `src/` fall below it (thresholds in
+`vite.config.ts`). CI runs both, so a pull request that drops coverage under 95 % fails. Cover
+new code in the same change; never lower a threshold or exclude code to get a change through.
 
 ## Unit Test Requirements
 
