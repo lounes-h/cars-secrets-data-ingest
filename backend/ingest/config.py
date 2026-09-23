@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql://ingest:ingest@localhost:5432/ingest"
+    # The API's own database, kept in step by the worker (api_sync.py). Empty = no sync.
+    api_database_url: str = Field(default="", repr=False)
+    # The API database keeps a removed lot until its sale time plus this (auctions run 2-4 h).
+    api_keep_after_sale_minutes: int = 240
+    # How often the worker syncs the API database besides right after each ingested file.
+    api_sync_interval_seconds: float = 900.0
 
     # Comma-separated providers expected to deliver files; each is checked for staleness.
     enabled_providers: str = "copart"

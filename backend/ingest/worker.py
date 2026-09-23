@@ -1,7 +1,8 @@
 """Long-running worker: watches inbox/<provider>/ and ingests each complete CSV, one at a time.
 
 Filesystem events give low latency; a periodic rescan catches anything the events missed
-(Docker bind mounts on macOS, files present at startup, a restart mid-download)."""
+(Docker bind mounts on macOS, files present at startup, a restart mid-download). After each
+ingested file, and on a timer, the API's database is brought up to date (api_sync.py)."""
 
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ import structlog
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import files
-from .alerts import AlertSpec, raise_alert
+from . import api_sync, files
+from .alerts import AlertSpec, raise_alert, resolve_fingerprint
 from .config import Settings, get_settings
 from .db import connect
 from .log_config import configure_logging
@@ -39,6 +40,7 @@ class Worker:
         self._warned: set[Path] = set()
         self._lock = threading.Lock()
         self.stop = threading.Event()
+        self.sync_requested = threading.Event()
         self.state = "idle"
 
     # --- discovery -------------------------------------------------------------------------
@@ -110,9 +112,11 @@ class Worker:
         provider = PROVIDERS[files.provider_of(path, self.settings.inbox_dir)]
         self.state = f"processing {path.name}"
         try:
-            process_file(conn, path, provider, self.settings)
+            outcome = process_file(conn, path, provider, self.settings)
         finally:
             self.state = "idle"
+        if outcome.status == "succeeded":
+            self.sync_requested.set()
         if path.exists():  # archiving failed; don't re-ingest the same bytes every rescan
             with self._lock:
                 self._done[path] = files.signature(path)
@@ -148,6 +152,43 @@ class Worker:
                 except OSError:
                     log.exception("archive.purge_failed")
             self.stop.wait(self.settings.heartbeat_seconds)
+
+    def sync_loop(self) -> None:
+        """Sync the API database at start, right after each ingested file, and at least every
+        `api_sync_interval_seconds`: that retries a failed sync and purges finished auctions
+        while no file arrives."""
+        while not self.stop.is_set():
+            self.sync_requested.clear()
+            self.sync_api()
+            self.sync_requested.wait(self.settings.api_sync_interval_seconds)
+
+    def sync_api(self) -> None:
+        s = self.settings
+        if not s.api_database_url:
+            return
+        try:
+            with connect(s.database_url) as conn:
+                try:
+                    result = api_sync.sync(conn, s.api_database_url,
+                                           s.api_keep_after_sale_minutes)
+                except Exception as exc:  # noqa: BLE001 - reported; the next sync redoes it
+                    log.exception("api_sync.failed")
+                    error = f"{type(exc).__name__}: {exc}"
+                    raise_alert(conn, AlertSpec(
+                        "warning", "api_sync_failed",
+                        f"The API database could not be updated: {error}"[:300],
+                        "api_sync_failed",
+                        {"error": error, "hint": "it is retried after the next file, or within "
+                                                 f"{s.api_sync_interval_seconds / 60:.0f} min"},
+                    ))
+                    return
+                resolve_fingerprint(conn, "api_sync_failed")
+        except psycopg.Error:  # the ingest database is down; the worker_down check reports it
+            log.exception("api_sync.ingest_db_unavailable")
+            return
+        log.info("api_sync.done", full=result.full, copied=result.copied,
+                 deleted=result.deleted, sync_version=result.sync_version,
+                 seconds=round(result.duration_seconds, 1))
 
     def rescan_loop(self) -> None:
         while not self.stop.wait(self.settings.inbox_rescan_seconds):
@@ -187,7 +228,7 @@ class Worker:
         observer.schedule(Handler(), str(s.inbox_dir), recursive=True)
         observer.start()
         threads = [threading.Thread(target=t, daemon=True, name=t.__name__)
-                   for t in (self.heartbeat_loop, self.rescan_loop)]
+                   for t in (self.heartbeat_loop, self.rescan_loop, self.sync_loop)]
         for t in threads:
             t.start()
         self.rescan()  # files that arrived while the worker was down

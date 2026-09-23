@@ -22,6 +22,8 @@ HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 DASHBOARD_PORT=8080
 POSTGRES_PORT=5433
+API_POSTGRES_PASSWORD=$(secret 16)
+API_POSTGRES_PORT=5434
 ENABLED_PROVIDERS=copart
 STALE_AFTER_MINUTES=75
 ARCHIVE_RETENTION_DAYS=7
@@ -29,6 +31,12 @@ COOKIE_SECURE=false
 ENV
   chmod 600 .env
   echo "Created .env with generated credentials."
+fi
+
+# .env files created before the API database existed lack its password.
+if ! grep -q '^API_POSTGRES_PASSWORD=' .env; then
+  echo "API_POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> .env
+  echo "Added the API database password to .env."
 fi
 
 set -a; . ./.env; set +a
@@ -67,6 +75,7 @@ cat <<MSG
   Dashboard   http://localhost:${DASHBOARD_PORT:-8080}
   Login       ${DASHBOARD_USERNAME:-admin} / ${DASHBOARD_PASSWORD}   (stored in .env)
   Inbox       $(pwd)/data/inbox/copart/   <- save Copart CSV exports here
+  API DB      postgresql://api:<API_POSTGRES_PASSWORD>@127.0.0.1:${API_POSTGRES_PORT:-5434}/api
   Downloader  ${DOWNLOADER_MSG}
 
   Try it:     cp ~/Downloads/salesdata.csv data/inbox/copart/

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from ingest.config import Settings
 from ingest.db import connect, run_migrations
@@ -39,6 +40,17 @@ def conn(db_url: str) -> Iterator[psycopg.Connection]:
     run_migrations(db_url)
     with connect(db_url) as c:
         yield c
+
+
+@pytest.fixture
+def api_url(db_url: str) -> str:
+    """An empty database on the same server, standing in for the API's."""
+    name = psycopg.conninfo.conninfo_to_dict(db_url)["dbname"] + "_api"
+    with psycopg.connect(db_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+            sql.Identifier(name)))
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    return psycopg.conninfo.make_conninfo(db_url, dbname=name)
 
 
 @pytest.fixture

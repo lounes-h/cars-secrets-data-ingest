@@ -16,6 +16,9 @@ downloader ──► data/inbox/<provider>/*.csv
                                │ api (FastAPI)│ ─────► │ web (React │
                                │ + monitor    │ ◄───── │  via nginx)│
                                └──────────────┘  JSON  └────────────┘
+
+ worker ── after each file + every 15 min ──► API database ◄── cars-secrets-api (reads)
+          (changed lots only, one transaction)  active lots + auctions not yet over
 ```
 
 | Module (`backend/ingest/`) | Responsibility |
@@ -25,6 +28,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `pipeline.py` | One file end to end: register, duplicate check, load, alerts, archive or fail |
 | `parsing.py` | Streaming CSV parser: header normalization, row validation, typed conversion, row hash |
 | `loader.py` | The single load transaction: staging, change detection, history, upsert, removals, registry |
+| `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -36,7 +40,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | Table | Holds |
 |---|---|
 | `ingest_files` | One row per file received: status, counts, removed lot numbers, duration, header, error, archive path |
-| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at` |
+| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version` |
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
@@ -107,6 +111,47 @@ before migration 0005). For older runs, the API recovers lot numbers whose remov
 fall within that run alone, provided their count matches `rows_removed`. If lots reappeared or
 run intervals overlap, a complete list may no longer be recoverable; the UI labels it
 unavailable. Copart's CSV `Id` row counter is never used as a lot identifier.
+
+## The API database
+
+`cars-secrets-api` does not read this database. It reads its own, which the worker keeps in
+step (`api_sync.py`) and which stays small. Around 200k lots are active at any time, while this
+database keeps every lot ever seen, with its history, and grows every day.
+
+| API database table | Holds |
+|---|---|
+| `lots` | Every active lot, and each removed lot until `sale_at` + `API_KEEP_AFTER_SALE_MINUTES` (240): the lot's auction runs 2–4 h after its sale time. Columns: `source`, `lot_number`, the canonical columns, `first_seen_at`, `last_changed_at`, `removed_at` (no `attributes`, hashes or file ids) |
+| `ingest_sync` | One row: the `sync_version` the table is at, and when it got there |
+
+The worker creates both tables and their indexes (`api_sync.ensure_schema`). A canonical
+column added later is added there too, and its values arrive through a full copy. The API's
+own tables (`app` schema) are migrated by `cars-secrets-api`.
+
+**How a sync works.** Every write to `lots` that changes a served column draws a new
+`sync_version` from `lots_sync_version_seq`: an insert, a real change, a typed column filled
+by a new mapping, a removal, a reappearance. Refreshing `last_seen_at` does not. Loads hold
+one global advisory lock, so a version never becomes visible after a higher one. A sync then:
+
+1. locks the API database's sync (two workers never interleave) and reads its watermark;
+2. streams `COPY (SELECT … WHERE sync_version > watermark)` from one repeatable-read snapshot
+   of this database into a temp table on the API database;
+3. upserts the lots to keep, deletes the changed lots it must not keep, deletes removed lots
+   whose auction is now over, and stores the new watermark, all in **one transaction**.
+
+API readers see either the previous state or the new one, never half a sync. A sync that fails
+(API database unreachable, a constraint) changes nothing there. The ingest is unaffected, the
+worker raises `api_sync_failed` (warning), and the next sync copies everything since the old
+watermark and resolves the alert.
+
+**When it runs.** Right after each successfully ingested file (hourly, with the downloader),
+at worker start, and every `API_SYNC_INTERVAL_SECONDS` (900). The timer retries failed syncs
+and purges finished auctions while no export arrives. A sync with nothing to copy or purge
+writes nothing to the API database.
+
+**Full copy.** When the API database has no watermark (new or emptied), its `lots` table is
+missing or lacks a column, or its watermark is ahead of this database (restored from a
+backup), the sync replaces its contents with every lot it should hold, still in one
+transaction.
 
 ## What a run did
 

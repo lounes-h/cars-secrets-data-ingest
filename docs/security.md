@@ -47,9 +47,20 @@ password manager fill the form in that profile, after which `login` clicks Sign 
 downloader never types credentials and never interacts with CAPTCHAs or bot checks. Such a
 page pauses it and raises an alert. Scheduled runs never attempt a login.
 
+## API database
+
+The worker writes the API's database (`API_DATABASE_URL`) and nothing else there: the
+`public.lots` and `public.ingest_sync` tables it creates. It copies only the columns the API
+serves: never `attributes`, the raw export rows. It refuses a URL whose `lots` table has the
+ingest's own columns, so a misconfigured URL can never make a full copy delete the ingest's
+lots. The URL holds the password and belongs in `.env` only. A hosted database needs
+`?sslmode=require`. Sync errors are logged and alerted with libpq's message, which never
+contains the password.
+
 ## Network
 
-Compose publishes only the dashboard (8080) and Postgres (5433), both on `127.0.0.1`. The API
+Compose publishes only the dashboard (8080), Postgres (5433) and the local API database
+(5434), all on `127.0.0.1`. The API
 is reachable only through nginx. Before exposing the dashboard beyond localhost, put it
 behind HTTPS and set `COOKIE_SECURE=true`.
 

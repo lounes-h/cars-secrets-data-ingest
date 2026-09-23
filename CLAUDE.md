@@ -9,10 +9,12 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 
 - **Backend** (`backend/`): Python 3.12, psycopg 3 (`COPY` for bulk loads), FastAPI + uvicorn,
   watchdog (file events), pydantic-settings, Alembic, structlog. Package: `ingest`.
-- **Database**: PostgreSQL 17.
+- **Database**: PostgreSQL 17, twice: the ingest database (source of truth, full history) and
+  the API's database (`cars-secrets-api`), which the worker keeps in step.
 - **Frontend** (`frontend/`): React 19 + TypeScript, Vite, TanStack Query, React Router,
   Recharts. Served by nginx, which also proxies `/api`.
-- **Runtime**: Docker Compose — `db`, `migrate` (one-shot), `worker`, `api`, `web`.
+- **Runtime**: Docker Compose — `db`, `api-db` (local stand-in for the API's hosted
+  database), `migrate` (one-shot), `worker`, `api`, `web`.
 - **Tests**: pytest + testcontainers (real Postgres), Vitest + Testing Library; 95 % minimum
   coverage on both.
 
@@ -84,6 +86,23 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   (`/api/runs/{id}/rows?kind=…`, 50 at a time), with the reason for each removal and each
   rejection. Older removed lists are recovered only when removal timestamps unambiguously
   account for the full count; otherwise the UI says the list is unavailable.
+- **API database** (`api_sync.py`): `cars-secrets-api` reads its own database, which stays
+  small: every active lot, and a removed lot only until `sale_at` +
+  `API_KEEP_AFTER_SALE_MINUTES` (240; auctions run 2–4 h), with only the columns it serves
+  (`api_sync.COLUMNS`: no `attributes`, history or file ids). The ingest database stays the
+  source of truth. Every write that changes a served column draws a new `lots.sync_version`
+  (`loader.NEXT_SYNC_VERSION`); loads hold one global advisory lock, so versions become
+  visible in order. The worker copies the lots above the API database's watermark
+  (`ingest_sync`), purges finished auctions and moves the watermark in **one API-database
+  transaction**, right after each ingested file and every `API_SYNC_INTERVAL_SECONDS` (900; it
+  retries failures and purges while no file arrives). An idle sync writes nothing. A failed sync
+  never fails the ingest: it raises `api_sync_failed` (warning), and the next sync redoes it
+  and resolves the alert. No watermark, a missing column or table, or a watermark ahead of the
+  ingest database (restored backup) triggers a full copy. The worker creates and extends the
+  API tables itself (additive only) and refuses a URL that points at the ingest database.
+  Anything that writes `lots` outside the loader, a migration's backfill included, must set
+  `sync_version = nextval('lots_sync_version_seq')` on the rows it changes, or the API never
+  sees the change.
 - **Lot photos**: `Provider.fetch_images` lists photos on demand (API
   `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
   only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
@@ -133,6 +152,8 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
 - File operations from the API stay inside configured directories (`retry` checks the path
   is under `FAILED_DIR`). CSV content is data: in the UI render it as text, never HTML.
 - Ports bind to `127.0.0.1` only. Set `COOKIE_SECURE=true` when serving over HTTPS.
+- `API_DATABASE_URL` carries the API database's password: it lives in `.env` only. Use
+  `sslmode=require` for a hosted database.
 - The downloader's Chrome profile (`~/.cars-ingest/copart-profile`, mode 700) holds the Copart
   session cookie: keep it out of the repo and never copy it elsewhere.
 
@@ -144,12 +165,18 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `cd backend && DATABASE_URL=… .venv/bin/alembic upgrade head`.
 - Never edit a migration that has run anywhere shared; add a new one. Large backfills (e.g.
   promoting an `attributes` key to a typed column) go in batches.
+- These migrations cover the ingest database only. The API database's `lots` and
+  `ingest_sync` tables are created and extended by `api_sync.ensure_schema`; a new canonical
+  column reaches them on its own, with a full copy.
 
 ## Tests
 
 Always add tests when adding or changing behaviour. Tests run against a real
 Postgres, not SQLite — the schema uses partial unique indexes and `now()`
 semantics that SQLite does not share.
+
+The `api_url` fixture stands in for the API's database: it recreates `<test db>_api` on the
+same server for each test, so the `TEST_DATABASE_URL` user needs `CREATEDB`.
 
 `backend/tests/fixtures/sample.csv` holds 300 real Copart rows plus 2 malformed (shifted)
 rows; build variations with `make_export` in `conftest.py` rather than adding fixtures.
@@ -229,7 +256,9 @@ A code change is not considered complete until the relevant unit tests have been
 - Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires
   when download size changes; tune `ROW_COUNT_DEVIATION_RATIO` if it is noisy.
-- Single worker by design (per-provider advisory lock makes a second one safe but idle).
+- Single worker by design (a global advisory lock makes a second one safe but idle).
+- The API reads its own database (`API_DATABASE_URL`, local `api-db` on 127.0.0.1:5434 by
+  default), holding ~200k active lots instead of every lot ever seen.
 - Copart downloader built (always-on under launchd, signs in with Chrome's saved login,
   closes pop-ups, relaunches Chrome after crashes; pauses and alerts on bot pages or a saved
   login that keeps failing).

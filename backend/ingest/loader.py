@@ -28,6 +28,8 @@ from .schema import CANONICAL_COLUMNS, COLUMN_NAMES
 _TYPED_DDL = ", ".join(f"{name} {sql_type}" for name, sql_type in CANONICAL_COLUMNS)
 _TYPED = ", ".join(COLUMN_NAMES)
 _TYPED_UPDATE = ", ".join(f"{name} = EXCLUDED.{name}" for name in COLUMN_NAMES)
+# A new sync version for every lot the API database has to copy again (api_sync.py).
+NEXT_SYNC_VERSION = "nextval('lots_sync_version_seq')"
 
 
 @dataclass
@@ -84,8 +86,16 @@ def load_file(
         changed = _common_columns_changed
         params = {"common": sorted(previous & current)}
 
-    # One ingest per provider at a time, even with several workers.
-    conn.execute("SELECT pg_advisory_xact_lock(hashtext('ingest:' || %s))", (source,))
+    # Typed columns filled from volatile source columns (Copart's export timestamp) change in
+    # every file; like the row hash, the API sync ignores them.
+    volatile = {csv_file.provider.mapped_to(c) for c in csv_file.provider.volatile_columns}
+    compared = [name for name in COLUMN_NAMES if name not in volatile]
+    typed_changed = (f"({', '.join(f'lots.{c}' for c in compared)}) IS DISTINCT FROM "
+                     f"({', '.join(f'EXCLUDED.{c}' for c in compared)})")
+
+    # One load at a time, even with several workers and providers: sync versions then commit
+    # in the order they were drawn, which the API sync's watermark relies on (api_sync.py).
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext('ingest:lots'))")
     conn.execute(
         f"""CREATE TEMP TABLE stage (
                 line_no integer, lot_number text, {_TYPED_DDL}, attributes jsonb, row_hash bytea
@@ -152,7 +162,11 @@ def load_file(
                 row_hash        = EXCLUDED.row_hash,
                 last_seen_at    = now(),
                 last_file_id    = EXCLUDED.last_file_id,
-                removed_at      = NULL""",
+                removed_at      = NULL,
+                sync_version    = CASE WHEN {changed("lots", "EXCLUDED")}
+                                         OR lots.removed_at IS NOT NULL
+                                         OR {typed_changed}
+                                       THEN {NEXT_SYNC_VERSION} ELSE lots.sync_version END""",
         {"source": source, "file_id": file_id, **params},
     )
 
@@ -214,7 +228,7 @@ def _mark_removed(
                   AND NOT EXISTS (SELECT 1 FROM stage s WHERE s.lot_number = l.lot_number)
                   AND l.lot_number <> ALL(%(unreadable)s)),
             removed AS (
-                UPDATE lots l SET removed_at = now()
+                UPDATE lots l SET removed_at = now(), sync_version = {NEXT_SYNC_VERSION}
                 FROM missing m
                 WHERE NOT m.pending AND l.source = m.source AND l.lot_number = m.lot_number
                 RETURNING l.lot_number)
