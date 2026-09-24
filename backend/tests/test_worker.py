@@ -9,6 +9,7 @@ from ingest.pipeline import Outcome
 from ingest.worker import Worker
 
 from .conftest import read_sample, write_csv
+from .test_pricing import save_model
 
 
 def wait_for(predicate, timeout=30.0):
@@ -213,6 +214,32 @@ def test_sync_api_copies_lots_and_alerts_until_it_works_again(conn, settings, db
     settings.api_database_url = api_url
     worker.sync_api()
     assert api_lot_count(api_url) == 300
+    assert conn.execute("SELECT resolved_at FROM alerts WHERE id = %s",
+                        (alert["id"],)).fetchone()["resolved_at"] is not None
+
+
+def test_sync_api_prices_lots_and_alerts_while_the_model_is_broken(
+        conn, settings, api_url):
+    worker = Worker(settings)
+    header, rows = read_sample()
+    worker._process(conn, write_csv(settings.inbox_dir / "copart" / "a.csv", header, rows))
+    model = settings.price_model_path
+    model.parent.mkdir(parents=True)
+    model.write_text("not a model")
+
+    worker.sync_api()  # no API database: lots are still priced (here: fail to be)
+
+    alert = conn.execute("SELECT * FROM alerts WHERE type = 'pricing_failed'").fetchone()
+    assert alert["severity"] == "warning" and alert["resolved_at"] is None
+
+    settings.api_database_url = api_url
+    worker.sync_api()  # a broken model never holds up the sync
+    assert api_lot_count(api_url) == 300
+
+    save_model(conn, model)
+    worker.sync_api()
+    with psycopg.connect(api_url) as c:
+        assert c.execute("SELECT count(predicted_final_price) FROM lots").fetchone()[0] == 300
     assert conn.execute("SELECT resolved_at FROM alerts WHERE id = %s",
                         (alert["id"],)).fetchone()["resolved_at"] is not None
 

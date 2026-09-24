@@ -29,7 +29,7 @@ from .schema import CANONICAL_COLUMNS
 COLUMNS: tuple[tuple[str, str], ...] = (
     ("source", "text"), ("lot_number", "text"), *CANONICAL_COLUMNS,
     ("first_seen_at", "timestamptz"), ("last_changed_at", "timestamptz"),
-    ("removed_at", "timestamptz"),
+    ("removed_at", "timestamptz"), ("predicted_final_price", "numeric"),  # pricing.py
 )
 _NOT_NULL = {"source", "lot_number", "first_seen_at", "last_changed_at"}
 _NAMES = ", ".join(name for name, _ in COLUMNS)

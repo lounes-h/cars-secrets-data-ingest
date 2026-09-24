@@ -61,6 +61,7 @@ def settings(tmp_path: Path, db_url: str) -> Settings:
         inbox_dir=tmp_path / "inbox",
         archive_dir=tmp_path / "archive",
         failed_dir=tmp_path / "failed",
+        price_model_path=tmp_path / "models" / "final_price.ubj",
         file_stable_seconds=0.2,
         dashboard_password="test-password",
         session_secret="s" * 40,

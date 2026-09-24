@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     api_keep_after_sale_minutes: int = 240
     # How often the worker syncs the API database besides right after each ingested file.
     api_sync_interval_seconds: float = 900.0
+    # The final price model (pricing.py); without the file, lots are not priced.
+    price_model_path: Path = Path("/data/models/final_price.ubj")
 
     # Comma-separated providers expected to deliver files; each is checked for staleness.
     enabled_providers: str = "copart"

@@ -2,7 +2,8 @@
 
 Filesystem events give low latency; a periodic rescan catches anything the events missed
 (Docker bind mounts on macOS, files present at startup, a restart mid-download). After each
-ingested file, and on a timer, the API's database is brought up to date (api_sync.py)."""
+ingested file, and on a timer, lots are priced (pricing.py) and the API's database is brought
+up to date (api_sync.py)."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import structlog
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import api_sync, files
+from . import api_sync, files, pricing
 from .alerts import AlertSpec, raise_alert, resolve_fingerprint
 from .config import Settings, get_settings
 from .db import connect
@@ -163,11 +164,14 @@ class Worker:
             self.sync_requested.wait(self.settings.api_sync_interval_seconds)
 
     def sync_api(self) -> None:
+        """Price the lots that need it, then copy them to the API database, so new predictions
+        go out with the same sync."""
         s = self.settings
-        if not s.api_database_url:
-            return
         try:
             with connect(s.database_url) as conn:
+                self.refresh_prices(conn)
+                if not s.api_database_url:
+                    return
                 try:
                     result = api_sync.sync(conn, s.api_database_url,
                                            s.api_keep_after_sale_minutes)
@@ -189,6 +193,24 @@ class Worker:
         log.info("api_sync.done", full=result.full, copied=result.copied,
                  deleted=result.deleted, sync_version=result.sync_version,
                  seconds=round(result.duration_seconds, 1))
+
+    def refresh_prices(self, conn) -> None:
+        path = self.settings.price_model_path
+        try:
+            priced = pricing.refresh(conn, path)
+        except Exception as exc:  # noqa: BLE001 - lots keep their last prediction meanwhile
+            log.exception("pricing.failed")
+            error = f"{type(exc).__name__}: {exc}"
+            raise_alert(conn, AlertSpec(
+                "warning", "pricing_failed",
+                f"Lots could not be priced: {error}"[:300], "pricing_failed",
+                {"error": error, "model": str(path),
+                 "hint": "fix or replace the model file; it is retried with the next sync"},
+            ))
+            return
+        resolve_fingerprint(conn, "pricing_failed")
+        if priced:
+            log.info("pricing.done", lots=priced)
 
     def rescan_loop(self) -> None:
         while not self.stop.wait(self.settings.inbox_rescan_seconds):
