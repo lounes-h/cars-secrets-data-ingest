@@ -433,7 +433,13 @@ def test_monitor_checks_every_round_survives_errors_and_notices_sleep(settings, 
         def connection(self):
             yield None
 
+    def mail(_conn, _settings):
+        mailed.append(True)
+        raise OSError("smtp unreachable")  # logged; the next round still runs
+
+    mailed = []
     monkeypatch.setattr(app_module, "run_checks", checks)
+    monkeypatch.setattr(app_module, "email_critical_alerts", mail)
     monkeypatch.setattr(app_module, "time", SimpleNamespace(time=lambda: next(clock)))
     monkeypatch.setattr(app_module, "asyncio", SimpleNamespace(
         sleep=sleep, to_thread=asyncio.to_thread, CancelledError=asyncio.CancelledError))
@@ -441,6 +447,7 @@ def test_monitor_checks_every_round_survives_errors_and_notices_sleep(settings, 
         asyncio.run(monitor_loop(Pool(), settings))
     assert seen == [False, False, True]  # a gap of over three rounds means the machine slept
     assert waits == [settings.monitor_interval_seconds] * 3
+    assert mailed == [True, True]  # not after the round whose checks failed
 
 
 def test_event_stream_relays_events_and_keeps_alive_until_the_browser_leaves(settings,

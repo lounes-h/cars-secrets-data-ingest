@@ -64,6 +64,8 @@ and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are i
 | Lots | Search by lot number, VIN, make or model, with thumbnails; per lot: photo gallery (full size + HD), a link to the lot on the auction site (all photos, bidding) and field-by-field change history |
 
 New warning and critical alerts pop up on whatever page is open (Server-Sent Events).
+Critical alerts are also emailed to `ALERT_EMAIL_TO` once they have been open for 2 minutes
+(set `SMTP_*` in `.env`, see `.env.example`): one message per new batch, not per repeat.
 
 ## Alerts
 

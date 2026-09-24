@@ -57,6 +57,12 @@ lots. The URL holds the password and belongs in `.env` only. A hosted database n
 `?sslmode=require`. Sync errors are logged and alerted with libpq's message, which never
 contains the password.
 
+## Alert email
+
+`SMTP_PASSWORD` (for Gmail, an app password, revocable on its own) lives in `.env` only and
+is never logged. Alert mails carry an alert's title and details (file names, counts, error
+messages), never export rows or credentials.
+
 ## Network
 
 Compose publishes only the dashboard (8080), Postgres (5433) and the local API database

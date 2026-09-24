@@ -1,6 +1,9 @@
 """Alert storage and periodic checks against a real PostgreSQL."""
 
-from ingest.alerts import AlertSpec, raise_alert, resolve_fingerprint
+import pytest
+
+from ingest import alerts
+from ingest.alerts import AlertSpec, email_critical_alerts, raise_alert, resolve_fingerprint
 from ingest.monitor import run_checks
 
 
@@ -96,3 +99,97 @@ def test_downloader_down_alert_raised_and_auto_resolved(conn, settings):
     conn.execute("UPDATE downloader_status SET heartbeat_at = now()")
     run_checks(conn, settings, after_sleep=True)  # resolving is always allowed
     assert "downloader_down:copart" not in open_alerts(conn)
+
+
+def age_alerts(conn, minutes=5):
+    conn.execute("UPDATE alerts SET created_at = now() - make_interval(mins => %s)", (minutes,))
+
+
+def test_critical_alerts_are_mailed_once_in_one_message(conn, settings):
+    settings = settings.model_copy(update={"smtp_host": "smtp.test", "alert_email_to": "me@x.test"})
+    sent = []
+    raise_alert(conn, AlertSpec("critical", "worker_down", "Worker silent", "a", {"n": 1}),
+                source="copart")
+    raise_alert(conn, AlertSpec("critical", "no_new_file", "No file", "b"))
+    raise_alert(conn, AlertSpec("warning", "slow_ingest", "Slow", "c"))
+    resolve_fingerprint(conn, "b")
+    raise_alert(conn, AlertSpec("critical", "ingest_failed", "Load failed", "d"))
+    age_alerts(conn)
+    raise_alert(conn, AlertSpec("critical", "fresh", "Just opened", "e"))  # may clear by itself
+
+    def send(_settings, subject, body):
+        sent.append((subject, body))
+
+    assert email_critical_alerts(conn, settings, send) == 2
+    [(subject, body)] = sent
+    assert subject == "[Cars ingest] 2 critical alerts: Worker silent"
+    assert "Worker silent\n  worker_down, source copart" in body and '{"n": 1}' in body
+    assert "Load failed" in body
+    assert not {"No file", "Slow", "Just opened"} & set(body.split("\n"))
+
+    assert email_critical_alerts(conn, settings, send) == 0  # already mailed
+    raise_alert(conn, AlertSpec("critical", "worker_down", "Worker silent", "a"))
+    assert email_critical_alerts(conn, settings, send) == 0  # repeat of a mailed alert
+
+    raise_alert(conn, AlertSpec("critical", "slow_ingest", "Very slow", "c"))  # escalated
+    age_alerts(conn)
+    assert email_critical_alerts(conn, settings, send) == 2
+    assert sent[-1][0] == "[Cars ingest] 2 critical alerts: Very slow"
+
+
+def test_alert_mail_is_retried_after_a_failed_send(conn, settings):
+    settings = settings.model_copy(update={"smtp_host": "smtp.test", "alert_email_to": "me@x.test"})
+    raise_alert(conn, AlertSpec("critical", "t", "Down", "a"))
+    age_alerts(conn)
+
+    def broken(*_):
+        raise OSError("smtp unreachable")
+
+    with pytest.raises(OSError):
+        email_critical_alerts(conn, settings, broken)
+    subjects = []
+    assert email_critical_alerts(conn, settings, lambda _s, subj, _b: subjects.append(subj)) == 1
+    assert subjects == ["[Cars ingest] Down"]
+
+
+def test_alerts_are_not_mailed_without_smtp_or_recipient(conn, settings):
+    raise_alert(conn, AlertSpec("critical", "t", "Down", "a"))
+    age_alerts(conn)
+    for update in ({}, {"smtp_host": "smtp.test"}, {"alert_email_to": "me@x.test"}):
+        assert email_critical_alerts(conn, settings.model_copy(update=update),
+                                     lambda *_: pytest.fail("mailed")) == 0
+
+
+def test_send_mail_uses_starttls_and_login(settings, monkeypatch):
+    calls = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            calls.append(("connect", host, port))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def starttls(self):
+            calls.append(("starttls",))
+
+        def login(self, user, password):
+            calls.append(("login", user, password))
+
+        def send_message(self, message):
+            calls.append(("send", message["To"], message["Subject"], message.get_content()))
+
+    monkeypatch.setattr(alerts.smtplib, "SMTP", FakeSMTP)
+    settings = settings.model_copy(update={
+        "smtp_host": "smtp.test", "smtp_port": 2525, "alert_email_to": "me@x.test",
+        "smtp_username": "u", "smtp_password": "p"})
+    alerts.send_mail(settings, "Bad\nfile.csv", "Body")
+    assert calls == [("connect", "smtp.test", 2525), ("starttls",), ("login", "u", "p"),
+                     ("send", "me@x.test", "Bad file.csv", "Body\n")]
+
+    calls.clear()
+    alerts.send_mail(settings.model_copy(update={"smtp_username": ""}), "S", "B")
+    assert [c[0] for c in calls] == ["connect", "starttls", "send"]  # no login for a relay

@@ -88,6 +88,12 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?run ./start.sh to create .env}
       SESSION_SECRET: ${SESSION_SECRET:?run ./start.sh to create .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@localhost}
     volumes:
       - ./data:/data  # "retry" moves a failed file back into the inbox
     depends_on:

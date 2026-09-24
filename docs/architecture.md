@@ -31,7 +31,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
-| `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
+| `alerts.py` | Alert rules (pure), storage (dedupe by fingerprint, auto-resolve) and email of critical alerts |
 | `monitor.py` | Periodic checks run by the API: worker heartbeat, staleness per provider |
 | `api/` | Dashboard REST API, SSE, session auth |
 
@@ -44,7 +44,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
-| `alerts` | Alerts; at most one unresolved row per `fingerprint` |
+| `alerts` | Alerts; at most one unresolved row per `fingerprint`; `emailed_at` once a critical one was mailed |
 | `worker_heartbeat` | Liveness of the worker |
 
 ### Why the schema survives CSV changes

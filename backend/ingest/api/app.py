@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
+from ..alerts import email_critical_alerts
 from ..config import Settings, get_settings
 from ..db import EVENTS_CHANNEL
 from ..log_config import configure_logging
@@ -82,6 +83,10 @@ async def monitor_loop(pool: ConnectionPool, settings: Settings) -> None:
     def check(after_sleep: bool) -> None:
         with pool.connection() as conn:
             run_checks(conn, settings, after_sleep=after_sleep)
+            try:
+                email_critical_alerts(conn, settings)
+            except Exception:  # noqa: BLE001 - retried next round; never stops the checks
+                log.exception("alerts.email_failed")
 
     last = None
     while True:

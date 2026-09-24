@@ -7,7 +7,11 @@ bumps its `occurrences` instead of creating a new row.
 
 from __future__ import annotations
 
+import json
+import smtplib
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from email.message import EmailMessage
 from typing import Any, Literal
 
 from psycopg import Connection
@@ -165,3 +169,51 @@ def resolve_fingerprint(conn: Connection, fingerprint: str, by: str = "system") 
     if cur.rowcount:
         notify(conn, "alert_resolved", fingerprint=fingerprint)
     return cur.rowcount
+
+
+# An alert must stay open this long before it is mailed, so conditions that clear by
+# themselves within a monitor round or two (the worker restarting with the stack) stay quiet.
+EMAIL_AFTER_SECONDS = 120
+
+
+def send_mail(settings: Settings, subject: str, body: str) -> None:
+    message = EmailMessage()
+    message["From"], message["To"] = settings.mail_from, settings.alert_email_to
+    message["Subject"] = " ".join(subject.split())  # titles hold file names: no line breaks
+    message.set_content(body)
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+        smtp.starttls()
+        if settings.smtp_username:
+            smtp.login(settings.smtp_username, settings.smtp_password)
+        smtp.send_message(message)
+
+
+def email_critical_alerts(
+    conn: Connection, settings: Settings,
+    send: Callable[[Settings, str, str], None] = send_mail,
+) -> int:
+    """Mails the open critical alerts not mailed yet, in one message. A failed send raises and
+    leaves them unmarked, so the next round retries. Returns how many were mailed."""
+    if not (settings.alert_email_to and settings.smtp_host):
+        return 0
+    rows = conn.execute(
+        """SELECT id, type, title, source, details, created_at FROM alerts
+           WHERE severity = 'critical' AND resolved_at IS NULL AND emailed_at IS NULL
+             AND created_at <= now() - make_interval(secs => %s)
+           ORDER BY id""",
+        (EMAIL_AFTER_SECONDS,),
+    ).fetchall()
+    if not rows:
+        return 0
+    first = rows[0]["title"]
+    subject = first if len(rows) == 1 else f"{len(rows)} critical alerts: {first}"
+    body = "\n\n".join(
+        f"{r['title']}\n  {r['type']}, source {r['source'] or '-'}, "
+        f"open since {r['created_at']:%Y-%m-%d %H:%M %Z}\n  {json.dumps(r['details'])}"
+        for r in rows
+    )
+    send(settings, f"[Cars ingest] {subject}",
+         body + "\n\nAcknowledge or resolve them on the ingest dashboard.")
+    conn.execute("UPDATE alerts SET emailed_at = clock_timestamp() WHERE id = ANY(%s)",
+                 ([r["id"] for r in rows],))
+    return len(rows)

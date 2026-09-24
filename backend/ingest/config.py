@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     baseline_runs: int = 24
     monitor_interval_seconds: float = 30.0
 
+    # Critical alerts are mailed here (one message per monitor round that finds new ones).
+    # Empty ALERT_EMAIL_TO or SMTP_HOST = dashboard only.
+    alert_email_to: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = Field(default="", repr=False)
+    mail_from: str = "no-reply@localhost"
+
     # Dashboard auth (API)
     dashboard_username: str = "admin"
     dashboard_password: str = Field(default="", repr=False)

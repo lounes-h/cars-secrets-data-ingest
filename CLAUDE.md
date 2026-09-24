@@ -110,7 +110,10 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API
-  process runs the periodic checks, so a dead worker is still reported.
+  process runs the periodic checks, so a dead worker is still reported. Each check round also
+  mails the critical alerts open ≥ 2 min and not mailed yet (`alerts.email_critical_alerts`,
+  one message, `alerts.emailed_at`) to `ALERT_EMAIL_TO` over `SMTP_*`; a failed send is
+  logged and retried next round. Repeats of an open alert are not mailed again.
 - **Live dashboard**: every state change calls `db.notify` (`pg_notify`) inside the same
   transaction; the API LISTENs and fans out over SSE (`/api/events`); the UI invalidates
   queries per event type (`frontend/src/lib/events.ts`).
@@ -248,8 +251,8 @@ A code change is not considered complete until the relevant unit tests have been
 ## Current state
 
 - Working end to end: watcher → ingest → Postgres, change history, schema-drift handling,
-  yard-scoped removals deferred until the auction is over, alerts (dashboard only, no
-  email/Slack by decision), dashboard with login, live updates, run retry, lot explorer with
+  yard-scoped removals deferred until the auction is over, alerts (dashboard, critical
+  ones also by email; no Slack), dashboard with login, live updates, run retry, lot explorer with
   photos. The Lots page's All, Active, and Removed filters show inventory totals, independent
   of search and pagination, refreshed by live ingestion events. One provider: Copart.
 - Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
@@ -264,7 +267,7 @@ A code change is not considered complete until the relevant unit tests have been
   login that keeps failing).
   Copart's Image and Data License Agreement governs the data and photos; the owner is
   checking that automated downloads are allowed.
-- Not done yet: external alert channels, a second provider.
+- Not done yet: a second provider.
 
 ## Branching
 
