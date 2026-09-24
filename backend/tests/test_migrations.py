@@ -2,6 +2,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,3 +29,15 @@ def test_offsite_columns_are_backfilled_from_attributes(conn, db_url):
         {"lot_number": "2", "offsite_address": None, "offsite_city": None,
          "offsite_state": None, "offsite_zip": None},
     ]
+
+
+def test_migrations_form_one_numbered_chain():
+    """Two branches that each add migration NNNN merge without a conflict, but then
+    `alembic upgrade` fails and no service starts."""
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(ROOT / "migrations"))
+    script = ScriptDirectory.from_config(cfg)
+    files = sorted((ROOT / "migrations" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))
+    chain = [r.revision for r in script.walk_revisions()][::-1]  # oldest first
+    assert len(script.get_heads()) == 1
+    assert chain == [f.name[:4] for f in files]  # one migration per number, in file order
