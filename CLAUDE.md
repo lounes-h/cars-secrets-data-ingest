@@ -25,6 +25,8 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 ./start.sh --logs               # same, then follow worker/api logs
 docker compose down             # stop (add -v to also drop the database)
 python3 scripts/simulate_export.py   # drop a realistic "next hour" export into the inbox
+docker compose run --rm worker python -m ingest.pricing synth    # training file, data/training/
+docker compose run --rm worker python -m ingest.pricing train /data/training/lots.csv.gz
 ./scripts/install_downloader.sh      # (re)install the always-on Copart downloader; start.sh does it
 (cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
@@ -103,6 +105,15 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   Anything that writes `lots` outside the loader, a migration's backfill included, must set
   `sync_version = nextval('lots_sync_version_seq')` on the rows it changes, or the API never
   sees the change.
+- **Price model** (`pricing.py`, see `docs/architecture.md`): XGBoost predicts each active
+  lot's final price, served as `predicted_final_price`. The training target is **generated**
+  (`synthesize`) until real sale prices exist; keep synthetic models out of production. The
+  worker prices lots right before each API sync: those not yet priced by the current model file
+  (sha256) at their current `sync_version`, in batches under the loader's lock, each batch
+  drawing a new `sync_version`. No model file = no prices; a failure raises `pricing_failed`
+  and never fails the sync. The training file holds only `pricing.COLUMNS` + `final_bid_sale`
+  (no ids, VINs or URLs). On macOS, xgboost needs `brew install libomp`; the image installs
+  `libgomp1` and takes `xgboost-cpu` on Linux (no NCCL).
 - **Lot photos**: `Provider.fetch_images` lists photos on demand (API
   `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
   only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
@@ -264,7 +275,10 @@ A code change is not considered complete until the relevant unit tests have been
   login that keeps failing).
   Copart's Image and Data License Agreement governs the data and photos; the owner is
   checking that automated downloads are allowed.
-- Not done yet: external alert channels, a second provider.
+- Final price model built and served (`predicted_final_price`), trained on generated sold
+  prices only: MAE $493 against a $2,032 baseline on the synthetic target. Where real sale
+  prices come from is open.
+- Not done yet: external alert channels, a second provider, real sale prices.
 
 ## Branching
 

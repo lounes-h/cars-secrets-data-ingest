@@ -29,6 +29,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `parsing.py` | Streaming CSV parser: header normalization, row validation, typed conversion, row hash |
 | `loader.py` | The single load transaction: staging, change detection, history, upsert, removals, registry |
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
+| `pricing.py` | Final price model: training file with generated sold prices, XGBoost training, pricing the active lots |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -40,7 +41,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | Table | Holds |
 |---|---|
 | `ingest_files` | One row per file received: status, counts, removed lot numbers, duration, header, error, archive path |
-| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version` |
+| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version`, and the price prediction (`predicted_final_price`, `prediction_model`, `predicted_version`) |
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
@@ -120,7 +121,7 @@ database keeps every lot ever seen, with its history, and grows every day.
 
 | API database table | Holds |
 |---|---|
-| `lots` | Every active lot, and each removed lot until `sale_at` + `API_KEEP_AFTER_SALE_MINUTES` (240): the lot's auction runs 2–4 h after its sale time. Columns: `source`, `lot_number`, the canonical columns, `first_seen_at`, `last_changed_at`, `removed_at` (no `attributes`, hashes or file ids) |
+| `lots` | Every active lot, and each removed lot until `sale_at` + `API_KEEP_AFTER_SALE_MINUTES` (240): the lot's auction runs 2–4 h after its sale time. Columns: `source`, `lot_number`, the canonical columns, `first_seen_at`, `last_changed_at`, `removed_at`, `predicted_final_price` (no `attributes`, hashes or file ids) |
 | `ingest_sync` | One row: the `sync_version` the table is at, and when it got there |
 
 The worker creates both tables and their indexes (`api_sync.ensure_schema`). A canonical
@@ -152,6 +153,33 @@ writes nothing to the API database.
 missing or lacks a column, or its watermark is ahead of this database (restored from a
 backup), the sync replaces its contents with every lot it should hold, still in one
 transaction.
+
+## Price model
+
+`pricing.py` predicts each active lot's final auction price with XGBoost; `api_sync` serves it as
+`predicted_final_price`. **No sold prices exist yet**: the training target is generated
+(`pricing.synthesize`: retail value discounted for damage, title, condition, age and mileage,
+less part of the repair cost, with noise), so predictions only exercise the pipeline until real
+sale prices replace it in the same training file.
+
+1. `python -m ingest.pricing synth` writes `data/training/lots.csv.gz`: the most recent 300k
+   lots, removed ones included, with only the model's columns (`pricing.COLUMNS`: no ids, VINs,
+   URLs or addresses) plus `final_bid_sale`.
+2. `python -m ingest.pricing train <file>` fits 70 %, stops early on 15 %, prints MAE, MAPE and
+   R² on the last 15 % next to a naive baseline (median price/retail ratio), and saves
+   `data/models/final_price.ubj`. Categories seen in fewer than 50 training rows count as
+   missing: every categorical split lists its categories, and keeping rare makes and models
+   made the model 240 MB instead of 30 MB. The kept categories are stored in the model, and
+   values it never saw are priced as missing.
+3. Before each API sync, the worker prices the active lots not yet priced by this model at
+   their current `sync_version` (`predicted_version`), 20k per transaction under the loader's
+   lock, and gives each batch a new `sync_version` so the sync copies it. The model is
+   identified by its file's sha256, so replacing the file reprices every lot. Without the file
+   (`PRICE_MODEL_PATH`, default `/data/models/final_price.ubj`) nothing is priced and the column
+   stays NULL. A failure raises `pricing_failed` (warning) and never holds up the sync.
+
+On the ~240k lots of 2026-09-23: MAE $493 against $2,032 for the baseline, R² 0.92, 7 s of
+training. Pricing all 148k active lots takes 12 s, and a refresh with nothing to do 0.5 s.
 
 ## What a run did
 

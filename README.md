@@ -84,6 +84,7 @@ New warning and critical alerts pop up on whatever page is open (Server-Sent Eve
 | `downloader_attention` | critical | Copart showed a login or verification page; downloads paused until you run `login` |
 | `downloader_failed` | warning → critical | The download failed (timeout, invalid file, changed page); retried with backoff |
 | `api_sync_failed` | warning | The API database could not be updated; retried after the next file or within 15 min, then resolves itself |
+| `pricing_failed` | warning | Lots could not be priced (unreadable model file); retried with each sync, which goes on without new prices |
 | `downloader_down` | critical | The always-on downloader stopped reporting for 2.5 min; resolves itself when launchd restarts it |
 
 ## Configuration
