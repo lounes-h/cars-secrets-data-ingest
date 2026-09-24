@@ -7,6 +7,10 @@ x-backend: &backend
   user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
   environment:
     DATABASE_URL: postgresql://ingest:${POSTGRES_PASSWORD:?run ./start.sh to create .env}@db:5432/ingest
+    # The API's database, kept in step by the worker. Defaults to the local api-db service;
+    # set API_DATABASE_URL in .env to use a hosted one (add ?sslmode=require).
+    API_DATABASE_URL: ${API_DATABASE_URL:-postgresql://api:${API_POSTGRES_PASSWORD:?run ./start.sh to create .env}@api-db:5432/api}
+    API_KEEP_AFTER_SALE_MINUTES: ${API_KEEP_AFTER_SALE_MINUTES:-240}
     ENABLED_PROVIDERS: ${ENABLED_PROVIDERS:-copart}
     STALE_AFTER_MINUTES: ${STALE_AFTER_MINUTES:-75}
     ARCHIVE_RETENTION_DAYS: ${ARCHIVE_RETENTION_DAYS:-7}
@@ -34,6 +38,24 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # The API's own database (cars-secrets-api): active lots only, filled by the worker.
+  api-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: api
+      POSTGRES_DB: api
+      POSTGRES_PASSWORD: ${API_POSTGRES_PASSWORD:?run ./start.sh to create .env}
+    volumes:
+      - apidata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${API_POSTGRES_PORT:-5434}:5432"  # cars-secrets-api connects here
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U api -d api"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
   migrate:
     <<: *backend
     command: ["alembic", "upgrade", "head"]
@@ -48,6 +70,7 @@ services:
       - ./data:/data
     depends_on:
       migrate: { condition: service_completed_successfully }
+      api-db: { condition: service_healthy }
     restart: unless-stopped
 
   api:
@@ -86,3 +109,4 @@ services:
 
 volumes:
   pgdata:
+  apidata:

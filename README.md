@@ -48,6 +48,10 @@ and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are i
 4. **Archived.** The file is gzipped into `data/archive/` (kept 7 days). If the load fails,
    the file goes to `data/failed/` instead, raises a critical alert, and can be retried from
    the dashboard.
+5. **Copied to the API database.** The lots the file changed are copied to the database
+   that `cars-secrets-api` reads (`API_DATABASE_URL`, a local `api-db` container by default).
+   It holds only active lots, plus removed lots until their auction is over (sale time + 4 h),
+   so it stays small. See [docs/architecture.md](docs/architecture.md#the-api-database).
 
 ## Dashboard
 
@@ -79,6 +83,7 @@ New warning and critical alerts pop up on whatever page is open (Server-Sent Eve
 | `duplicate_file` | info | Identical export received again |
 | `downloader_attention` | critical | Copart showed a login or verification page; downloads paused until you run `login` |
 | `downloader_failed` | warning → critical | The download failed (timeout, invalid file, changed page); retried with backoff |
+| `api_sync_failed` | warning | The API database could not be updated; retried after the next file or within 15 min, then resolves itself |
 | `downloader_down` | critical | The always-on downloader stopped reporting for 2.5 min; resolves itself when launchd restarts it |
 
 ## Configuration

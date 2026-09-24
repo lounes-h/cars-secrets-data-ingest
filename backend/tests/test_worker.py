@@ -5,6 +5,7 @@ import time
 import psycopg
 
 from ingest import worker as worker_module
+from ingest.pipeline import Outcome
 from ingest.worker import Worker
 
 from .conftest import read_sample, write_csv
@@ -34,8 +35,9 @@ def test_offer_routes_by_provider_folder_and_deduplicates(conn, settings):
     assert alerts == [{"type": "unroutable_file", "severity": "warning"}]  # once, not twice
 
 
-def test_worker_ingests_files_dropped_into_the_inbox(conn, settings):
+def test_worker_ingests_files_dropped_into_the_inbox(conn, settings, api_url):
     settings.inbox_rescan_seconds = 1
+    settings.api_database_url = api_url
     worker = Worker(settings)
     header, rows = read_sample()
     # present before start (picked up by the startup scan)
@@ -54,11 +56,21 @@ def test_worker_ingests_files_dropped_into_the_inbox(conn, settings):
         ).fetchone()["n"] == 2)
         assert wait_for(lambda: conn.execute(
             "SELECT count(*) AS n FROM worker_heartbeat").fetchone()["n"] == 1)
+        # each ingested file is copied to the API database without waiting for the timer
+        assert wait_for(lambda: api_lot_count(api_url) == 300)
     finally:
         worker.stop.set()
         thread.join(timeout=10)
     assert conn.execute("SELECT count(*) AS n FROM lots").fetchone()["n"] == 300
     assert not list((settings.inbox_dir / "copart").glob("*.csv"))
+
+
+def api_lot_count(api_url):
+    try:
+        with psycopg.connect(api_url) as c:
+            return c.execute("SELECT count(*) FROM lots").fetchone()[0]
+    except psycopg.errors.UndefinedTable:  # before the first sync
+        return 0
 
 
 class FakeConn:
@@ -117,9 +129,11 @@ def test_a_file_that_could_not_be_archived_is_not_ingested_again(conn, settings,
     worker = Worker(settings)
     header, rows = read_sample()
     path = write_csv(settings.inbox_dir / "copart" / "a.csv", header, rows[:1])
-    monkeypatch.setattr(worker_module, "process_file", lambda *a: None)  # archiving "failed"
+    # loaded, but archiving "failed"
+    monkeypatch.setattr(worker_module, "process_file", lambda *a: Outcome(1, "succeeded"))
     worker._process(conn, path)
     assert worker.state == "idle"
+    assert worker.sync_requested.is_set()  # the API database is updated right away
     worker.offer(path)
     assert worker.queue.empty()
 
@@ -182,3 +196,60 @@ def test_main_stops_the_worker_on_sigterm(settings, monkeypatch):
     worker_module.main()
     handlers[signal.SIGTERM]()
     assert workers[0].stop.is_set()
+
+
+def test_sync_api_copies_lots_and_alerts_until_it_works_again(conn, settings, db_url, api_url):
+    worker = Worker(settings)
+    header, rows = read_sample()
+    worker._process(conn, write_csv(settings.inbox_dir / "copart" / "a.csv", header, rows))
+    worker.sync_api()  # no API database configured: nothing to do
+
+    settings.api_database_url = db_url  # misconfigured: refused and alerted, nothing copied
+    worker.sync_api()
+    alert = conn.execute("SELECT * FROM alerts WHERE type = 'api_sync_failed'").fetchone()
+    assert alert["severity"] == "warning" and alert["resolved_at"] is None
+    assert "points at the ingest database" in alert["title"]
+
+    settings.api_database_url = api_url
+    worker.sync_api()
+    assert api_lot_count(api_url) == 300
+    assert conn.execute("SELECT resolved_at FROM alerts WHERE id = %s",
+                        (alert["id"],)).fetchone()["resolved_at"] is not None
+
+
+def test_sync_api_survives_an_unreachable_ingest_database(settings, monkeypatch):
+    settings.api_database_url = "postgresql://nowhere/api"
+    worker = Worker(settings)
+
+    def down(_url):
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(worker_module, "connect", down)
+    worker.sync_api()  # logged; the next round retries
+
+
+def test_sync_loop_runs_at_start_on_request_and_on_its_timer(settings, monkeypatch):
+    worker = Worker(settings)
+    settings.api_sync_interval_seconds = 3600
+    calls = []
+
+    def sync_api():
+        calls.append(1)
+        if len(calls) == 1:
+            worker.sync_requested.set()  # a file was ingested meanwhile: no hour-long wait
+        else:
+            worker.stop.set()
+            worker.sync_requested.set()  # ends the wait
+
+    monkeypatch.setattr(worker, "sync_api", sync_api)
+    started = time.monotonic()
+    worker.sync_loop()
+    assert len(calls) == 2 and time.monotonic() - started < 5
+
+    worker.stop.clear()
+    settings.api_sync_interval_seconds = 0.01
+    calls.clear()
+    monkeypatch.setattr(worker, "sync_api", lambda: calls.append(1) or (
+        len(calls) == 3 and worker.stop.set()))
+    worker.sync_loop()  # nothing requested: the timer alone drives it
+    assert len(calls) == 3
