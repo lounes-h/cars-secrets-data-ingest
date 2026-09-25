@@ -30,6 +30,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `loader.py` | The single load transaction: staging, change detection, history, upsert, removals, registry |
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
 | `pricing.py` | Final price model: training file with generated sold prices, XGBoost training, pricing the active lots |
+| `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -180,6 +181,28 @@ sale prices replace it in the same training file.
 
 On the ~240k lots of 2026-09-23: MAE $493 against $2,032 for the baseline, R² 0.92, 7 s of
 training. Pricing all 148k active lots takes 12 s, and a refresh with nothing to do 0.5 s.
+
+### Real sale prices: checking the third-party APIs
+
+apibara.tech and apiauctions.io index Copart and IAA lots with their final prices. Before their
+prices train the model (and IAA lots become a provider), `python -m ingest.api_check` measures
+them. A run holds four slices: the Copart and IAA lots of one make sold on one day, and those
+scheduled for a later day. A slice is complete, so coverage can be measured, and small enough
+for a free quota (apibara: 100 requests a month, 20 lots a page).
+
+- `fetch` saves each raw page under `data/checks/<sold>_<active>_<make>/<api>/<slice>/` and
+  never requests a saved page again; an API without a key is skipped.
+- `report` runs offline. For Copart it compares every lot with ours: coverage both ways, VIN,
+  year, make, odometer, damage, the sale time (during its auction, 4 h, or before it but not
+  before we last saw it listed) and the price, which can never be below the high bid of our
+  last export (bids are binding) nor below the API's own last bid. It compares the two APIs
+  with each other and with `manual.csv`, where a person enters the final prices they read on
+  copart.com / iaai.com. Doubtful prices head that list. It prints the shares with the bar each
+  must reach and writes `summary.json` and `mismatches.csv`.
+
+apibara reports the auction's start as `auction_at` for a lot sold at auction, the moment of
+sale for one sold before it, and a Buy Now sale's price only as `buy_now_usd`. The apiauctions
+mapping follows its documentation only, until a token lets a run check it.
 
 ## What a run did
 

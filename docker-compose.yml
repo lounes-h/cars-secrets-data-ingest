@@ -16,6 +16,9 @@ x-backend: &backend
     ARCHIVE_RETENTION_DAYS: ${ARCHIVE_RETENTION_DAYS:-7}
     ROW_COUNT_DEVIATION_RATIO: ${ROW_COUNT_DEVIATION_RATIO:-0.3}
     REMOVAL_GRACE_MINUTES: ${REMOVAL_GRACE_MINUTES:-120}
+    # Auction data APIs checked by `python -m ingest.api_check` (keys live in .env only).
+    APIBARA_API_KEY: ${APIBARA_API_KEY:-}
+    APIAUCTIONS_TOKEN: ${APIAUCTIONS_TOKEN:-}
     INBOX_DIR: /data/inbox
     ARCHIVE_DIR: /data/archive
     FAILED_DIR: /data/failed

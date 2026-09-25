@@ -28,6 +28,9 @@ python3 scripts/simulate_export.py   # drop a realistic "next hour" export into 
 docker compose run --rm worker python -m ingest.pricing synth    # training file, data/training/
 docker compose run --rm worker python -m ingest.pricing train /data/training/lots.csv.gz
 ./scripts/install_downloader.sh      # (re)install the always-on Copart downloader; start.sh does it
+docker compose run --rm worker python -m ingest.api_check fetch --sold-date 2026-09-23 \
+    --active-date 2026-09-30 --make VOLVO     # sale-price APIs: save one run's pages (keys in .env)
+docker compose run --rm worker python -m ingest.api_check report /data/checks/<run>  # offline
 (cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
 # backend (from backend/)
@@ -276,8 +279,12 @@ A code change is not considered complete until the relevant unit tests have been
   Copart's Image and Data License Agreement governs the data and photos; the owner is
   checking that automated downloads are allowed.
 - Final price model built and served (`predicted_final_price`), trained on generated sold
-  prices only: MAE $493 against a $2,032 baseline on the synthetic target. Where real sale
-  prices come from is open.
+  prices only: MAE $493 against a $2,032 baseline on the synthetic target.
+- Real sale prices: apibara.tech and apiauctions.io are being checked (`api_check.py`, see
+  `docs/architecture.md`) before their prices train the model and IAA lots become a second
+  provider (Copart stays on the downloader). apibara's first run (Volvo, 2026-09-23): VINs
+  and specs 100 % right, 98 % of our sold Copart lots listed, but 5 of 61 Copart prices under
+  the lot's standing bid, and 3 of 52 upcoming lots missing. No apiauctions token yet.
 - Not done yet: external alert channels, a second provider, real sale prices.
 
 ## Branching
