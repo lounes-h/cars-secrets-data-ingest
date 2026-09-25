@@ -282,9 +282,10 @@ A code change is not considered complete until the relevant unit tests have been
   prices only: MAE $493 against a $2,032 baseline on the synthetic target.
 - Real sale prices: apibara.tech and apiauctions.io are being checked (`api_check.py`, see
   `docs/architecture.md`) before their prices train the model and IAA lots become a second
-  provider (Copart stays on the downloader). apibara's first run (Volvo, 2026-09-23): VINs
-  and specs 100 % right, 98 % of our sold Copart lots listed, but 5 of 61 Copart prices under
-  the lot's standing bid, and 3 of 52 upcoming lots missing. No apiauctions token yet.
+  provider (Copart stays on the downloader). Run of 2026-09-25 (Volvo, sold 09-23, upcoming
+  09-30): both list 100 % of our Copart lots with right VINs and specs; apibara priced 5 of 50
+  sold Copart lots below a binding bid, apiauctions none; the two agree on 79 % of Copart
+  prices and 100 % of IAA prices. Choosing one waits on the manual spot check.
 - Not done yet: external alert channels, a second provider, real sale prices.
 
 ## Branching

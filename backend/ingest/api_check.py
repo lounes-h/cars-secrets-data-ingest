@@ -42,23 +42,25 @@ AUCTION = timedelta(hours=4)  # a live auction sells its lots over 2-4 h after i
 # The share each check must reach for an API to be trusted; the others are for information.
 PASS = {"ours_in_api": 0.95, "overlap": 0.95, "vin": 0.99, "year": 0.99, "make": 0.99,
         "price_present": 0.90, "price_at_least_bid": 1.0, "price_at_least_prebid": 1.0,
-        "same_price": 0.95, "sale_time": 0.98}
+        "relisted_not_sold": 1.0, "same_status": 0.95, "same_price": 0.95,
+        "sale_time": 0.98}
 # How complete each API's lots are (what an IAA provider and the price model could use).
 FIELDS = ("vin", "odometer", "damage", "has_keys", "runs", "title", "retail", "sale_at",
           "final_price", "current_bid", "buy_now")
 
-# Our Copart lots the APIs listed, and those of the run's make and days. `sold`: still listed
-# when its auction started and gone after it; `active`: still in the latest exports.
+# Our Copart lots the APIs listed, and those of the run's make and days (Copart's own sale
+# date: a night auction at 01:00 UTC is on the US evening before). `sold`: still listed when its
+# auction started and gone after it; `active`: still in the latest exports.
 OURS = """
     SELECT lot_number, vin, year, make, odometer, damage_primary, high_bid, buy_it_now_price,
-           sale_at, last_seen_at, (sale_at AT TIME ZONE 'UTC')::date AS day,
+           sale_at, last_seen_at, removed_at, sale_date AS day,
            removed_at IS NOT NULL AND last_seen_at >= sale_at - interval '1 hour' AS sold,
            removed_at IS NULL AND last_seen_at >= (SELECT max(last_seen_at) FROM lots
                                                     WHERE source = 'copart')
                                                    - interval '2 hours' AS active
     FROM lots
     WHERE source = 'copart'
-      AND (lot_number = ANY(%s) OR (make = %s AND (sale_at AT TIME ZONE 'UTC')::date = ANY(%s)))
+      AND (lot_number = ANY(%s) OR (make = %s AND sale_date = ANY(%s)))
 """
 
 
@@ -87,16 +89,16 @@ def _apibara(key: str, s: Slice, cursor: Any) -> Any:
 
 
 def _apiauctions(key: str, s: Slice, page: Any) -> Any:
-    # ponytail: auction names guessed; /api/v2/get-auctions lists the exact ones.
+    # US auctions are "COPART" and "IAAI" (/api/v2/get-auctions); 50 lots a page at most.
     params = {"auction_name": s.source.upper(), "make": s.make, "auction_date_from": s.day,
-              "auction_date_to": s.day, "page": page or 1, "per_page": 100}
+              "auction_date_to": s.day, "page": page or 1, "per_page": 50}
     endpoint = "get-cars" if s.kind == "sold" else "get-active-lots"
     return auction_apis.apiauctions_page(key, endpoint, params)
 
 
 def _apiauctions_next(body: Any, page: Any) -> Any:
     page = page or 1
-    return page + 1 if page < ((body.get("meta") or {}).get("last_page") or 0) else None
+    return page + 1 if page < ((body.get("pagination") or {}).get("total_pages") or 0) else None
 
 
 @dataclass(frozen=True)
@@ -148,7 +150,8 @@ def load(run_dir: Path, api: str) -> dict[str, list[Record]]:
     for s in slices(_run(run_dir)):
         lots = {}
         for path in sorted((run_dir / api / s.name).glob("*.json"), key=lambda p: int(p.stem)):
-            for item in json.loads(path.read_text()).get("data") or []:
+            body = json.loads(path.read_text())
+            for item in body.get("data") or body.get("result") or []:  # apibara, apiauctions
                 record = APIS[api].normalize(item)
                 lots[record.lot_number] = record
         out[s.name] = list(lots.values())
@@ -195,13 +198,19 @@ def check(record: Record, ours: Mapping[str, Any], kind: str) -> dict[str, bool 
     }
     price, buy_now = record.final_price, money(ours["buy_it_now_price"])
     if kind == "active":
-        result["sale_time"] = _near(record.sale_at, ours["sale_at"], HOUR)
+        result["sale_time"] = _near(record.next_sale_at or record.sale_at, ours["sale_at"], HOUR)
         result["buy_now"] = _same(record.buy_now, buy_now)
         return result
     prebid = money(ours["high_bid"])
     # Bids are binding: an auction never ends below the high bid of our last export.
     result["price_at_least_prebid"] = None if price is None or prebid is None else price >= prebid
     if record.sale_at is None or ours["sale_at"] is None:
+        return result
+    # Listed after that auction for a later one: it came back unsold. (A lot bought before its
+    # auction also stays unremoved until then, but is no longer listed.)
+    if (ours["removed_at"] is None and ours["last_seen_at"] > record.sale_at
+            and ours["sale_at"] > record.sale_at + AUCTION):
+        result["relisted_not_sold"] = not record.sold
         return result
     # Sold during its auction, or before it but not before we last saw it listed; then at
     # the Buy It Now price we last saw, unless an offer won.
@@ -213,12 +222,22 @@ def check(record: Record, ours: Mapping[str, Any], kind: str) -> dict[str, bool 
     return result
 
 
-def cross(a: list[Record], b: list[Record]) -> dict[str, float | None]:
-    """How far two APIs agree on one slice: the lots they both list, then prices and VINs."""
+def _status(record: Record) -> bool | None:
+    return None if record.status is None else record.sold
+
+
+def cross(a: list[Record], b: list[Record], sold_only: bool = False) -> dict[str, float | None]:
+    """How far two APIs agree on one slice: the lots they both list, then whether each sold, at
+    what price, and VINs. `sold_only`: only the lots either says sold (one API may leave the
+    unsold lots out)."""
     by_lot_a, by_lot_b = {r.lot_number: r for r in a}, {r.lot_number: r for r in b}
-    both = by_lot_a.keys() & by_lot_b.keys()
-    return {"overlap": share(len(both), len(by_lot_a.keys() | by_lot_b.keys())),
-            **shares({"same_price": _same(by_lot_a[n].final_price, by_lot_b[n].final_price),
+    lots = by_lot_a.keys() | by_lot_b.keys()
+    if sold_only:
+        lots = {n for n in lots if any(n in by and by[n].sold for by in (by_lot_a, by_lot_b))}
+    both = lots & by_lot_a.keys() & by_lot_b.keys()
+    return {"overlap": share(len(both), len(lots)),
+            **shares({"same_status": _same(_status(by_lot_a[n]), _status(by_lot_b[n])),
+                      "same_price": _same(by_lot_a[n].final_price, by_lot_b[n].final_price),
                       "same_vin": _same(by_lot_a[n].vin, by_lot_b[n].vin)} for n in both)}
 
 
@@ -338,7 +357,21 @@ def report(conn: Connection, run_dir: Path) -> dict[str, Any]:
 
     if len(apis) == 2:
         a, b = apis.values()
-        summary["cross"] = {s.name: cross(a[s.name], b[s.name]) for s in slices(run)}
+        summary["cross"] = {s.name: cross(a[s.name], b[s.name], s.kind == "sold")
+                            for s in slices(run)}
+        for s in slices(run):
+            other = {r.lot_number: r for r in b[s.name]}
+            for r in a[s.name]:
+                if (o := other.get(r.lot_number)) is None:
+                    continue
+                if r.final_price and o.final_price not in (None, r.final_price):
+                    problem = f"other_api_price:{o.final_price:g}"
+                elif None not in (r.status, o.status) and r.sold != o.sold:
+                    problem = f"other_api_status:{o.status}"
+                else:
+                    continue
+                suspects.add((r.source, r.lot_number))
+                mismatches.append(_mismatch(" vs ".join(apis), s, r, None, problem))
 
     manual = run_dir / "manual.csv"
     if not manual.exists():

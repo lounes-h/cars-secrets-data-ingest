@@ -8,7 +8,7 @@ import json
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -39,11 +39,13 @@ class Record:
     final_price: float | None
     current_bid: float | None
     buy_now: float | None
+    next_sale_at: datetime | None = None  # a later auction it is scheduled for, if known apart
 
     @property
     def sold(self) -> bool:
-        """The API says the lot sold ("Sold", "Sold on Approval")."""
-        return self.status is not None and self.status.lower().startswith("sold")
+        """The API says the lot sold. "Sold on Approval" is a bid awaiting the seller's approval,
+        not a sale: sellers often decline it, and the lot comes back for another auction."""
+        return self.status is not None and self.status.lower() == "sold"
 
 
 def _get_json(request: urllib.request.Request) -> Any:
@@ -82,6 +84,13 @@ def _time(value: Any) -> datetime | None:
     return moment if moment.tzinfo else None
 
 
+def _epoch(value: Any, per_second: int = 1) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(int(value) / per_second, UTC)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_apibara(v: Mapping[str, Any]) -> Record:
     auction, pricing = v.get("auction") or {}, v.get("pricing") or {}
     condition = v.get("condition") or {}
@@ -99,22 +108,23 @@ def normalize_apibara(v: Mapping[str, Any]) -> Record:
         buy_now=money(pricing.get("buy_now_usd")))
 
 
-# ponytail: shaped after the docs' examples only (no token yet); check on the first real page.
 def normalize_apiauctions(car: Mapping[str, Any]) -> Record:
-    history = sorted(car.get("history") or [], key=lambda h: str(h.get("sale_date") or ""))
-    last = history[-1] if history else {}
-
-    def pick(key: str, history_key: str | None = None) -> Any:
-        value = car.get(key)
-        return value if value is not None else last.get(history_key or key)
-
-    auction = str(pick("auction") or "").lower()
+    """A lot keeps only its latest sale in `sales_history` ("Sold" / "Not sold", the price, epoch
+    seconds); a later auction it is scheduled for is in `active_bidding` (epoch milliseconds).
+    For an unsold lot `purchase_price` is the bid that was not accepted: no final price."""
+    sales = sorted(car.get("sales_history") or [], key=lambda s: s.get("sale_date") or 0)
+    last = sales[-1] if sales else {}
+    bidding = (car.get("active_bidding") or [{}])[-1]
+    auction = str(car.get("auction_name") or "").lower()
     return Record(
-        api="apiauctions", source="iaai" if auction.startswith("iaa") else auction,
-        lot_number=str(pick("lot_number")), vin=car.get("vin"), year=car.get("year"),
-        make=car.get("make"), model=car.get("model"), odometer=pick("odometer"),
-        damage=pick("primary_damage"), has_keys=car.get("has_keys"), runs=car.get("highlights"),
-        title=pick("title_type"), retail=money(car.get("estimate_retail")),
-        status=pick("sale_status"), sale_at=_time(pick("auction_date", "sale_date")),
-        final_price=money(pick("sale_price", "final_bid")),
-        current_bid=money(car.get("current_bid")), buy_now=money(car.get("buy_now_price")))
+        api="apiauctions", source="iaai" if auction.startswith("iaai") else auction,
+        lot_number=str(car["lot_number"]), vin=car.get("vin"), year=car.get("year"),
+        make=car.get("make"), model=car.get("model"), odometer=car.get("odometer"),
+        damage=car.get("primary_damage"), has_keys=car.get("car_keys"),
+        runs=car.get("highlights"), title=car.get("doc_type"),
+        retail=money(car.get("est_retail_value")), status=last.get("sale_status"),
+        sale_at=_epoch(last.get("sale_date")),
+        final_price=money(last.get("purchase_price")) if last.get("sold") else None,
+        current_bid=money(bidding.get("current_bid")),
+        buy_now=money((car.get("buy_now_car") or {}).get("purchase_price")),
+        next_sale_at=_epoch(bidding.get("sale_date"), 1000))

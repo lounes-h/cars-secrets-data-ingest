@@ -48,35 +48,49 @@ def test_a_buy_now_sale_without_a_sale_price_sold_at_the_buy_now_price():
     assert normalize_apibara(lot).final_price is None
 
 
-def test_apiauctions_lot_takes_the_latest_sale_from_its_history():
+SOLD_AT = datetime(2026, 9, 23, 16, tzinfo=UTC)
+# One lot as apiauctions returns it (trimmed from a real page).
+APIAUCTIONS_LOT = {
+    "auction_name": "COPART", "lot_number": 69097296, "vin": "YV4A22PL0K1499418", "year": 2019,
+    "make": "VOLVO", "model": "XC90", "odometer": 202550, "primary_damage": "FRONT END",
+    "car_keys": "yes", "highlights": "RUNS AND DRIVES", "doc_type": "OR - CERTIFICATE OF TITLE",
+    "est_retail_value": 0, "active_bidding": [], "buy_now_car": None,
+    "sales_history": [{"purchase_price": 30250, "sale_status": "Sold", "sold": 1,
+                       "sale_date": int(SOLD_AT.timestamp())}],
+}
+
+
+def test_apiauctions_lot_is_normalized():
+    assert normalize_apiauctions(APIAUCTIONS_LOT) == Record(
+        api="apiauctions", source="copart", lot_number="69097296", vin="YV4A22PL0K1499418",
+        year=2019, make="VOLVO", model="XC90", odometer=202550, damage="FRONT END",
+        has_keys="yes", runs="RUNS AND DRIVES", title="OR - CERTIFICATE OF TITLE", retail=None,
+        status="Sold", sale_at=SOLD_AT, final_price=30250, current_bid=None, buy_now=None)
+
+
+def test_an_unsold_apiauctions_lot_has_no_final_price_and_its_next_auction():
+    next_sale = datetime(2026, 9, 30, 1, tzinfo=UTC)
     record = normalize_apiauctions({
-        "vin": "5UXKR0C52G0P21189", "make": "BMW", "model": "X5", "year": 2016,
-        "estimate_retail": 21500, "current_bid": 8400, "buy_now_price": None,
-        "history": [
-            {"auction": "IAAI", "lot_number": 2, "sale_date": "2024-08-12T15:00:00Z",
-             "sale_status": "Sold", "final_bid": 4200, "odometer": 86134,
-             "primary_damage": "Front End", "title_type": "Salvage"},
-            {"auction": "IAAI", "lot_number": 1, "sale_date": "2024-03-01T15:00:00Z",
-             "sale_status": "Not Sold", "final_bid": 0},
-        ],
-    })
-    assert (record.source, record.lot_number, record.final_price, record.status) == (
-        "iaai", "2", 4200, "Sold")
-    assert record.sale_at == datetime(2024, 8, 12, 15, tzinfo=UTC)
-    assert (record.odometer, record.damage, record.title, record.retail) == (
-        86134, "Front End", "Salvage", 21500)
-    assert (record.current_bid, record.buy_now) == (8400, None)
+        **APIAUCTIONS_LOT, "auction_name": "IAAI", "est_retail_value": 14600,
+        "sales_history": [{"purchase_price": 8900, "sale_status": "Not sold", "sold": 0,
+                           "sale_date": int(SOLD_AT.timestamp())}],
+        "active_bidding": [{"sale_date": str(int(next_sale.timestamp()) * 1000),
+                            "current_bid": 8900}],
+        "buy_now_car": {"purchase_price": 9300}})
+    assert (record.source, record.status, record.final_price, record.sale_at) == (
+        "iaai", "Not sold", None, SOLD_AT)  # 8900 is the bid the seller did not accept
+    assert (record.next_sale_at, record.current_bid, record.buy_now, record.retail) == (
+        next_sale, 8900, 9300, 14600)
 
 
-def test_apiauctions_lot_fields_win_over_history_and_a_bare_date_is_no_sale_time():
-    record = normalize_apiauctions({"lot_number": 41234567, "auction": "COPART",
-                                    "auction_date": "2024-09-05", "sale_price": 7900})
-    assert (record.source, record.lot_number, record.final_price) == ("copart", "41234567", 7900)
-    assert record.sale_at is None
+def test_an_apiauctions_lot_never_auctioned_has_no_sale():
+    record = normalize_apiauctions({"lot_number": 1, "auction_name": "COPART"})
+    assert (record.status, record.sale_at, record.final_price, record.next_sale_at) == (
+        None, None, None, None)
 
 
-@pytest.mark.parametrize(("status", "sold"), [(None, False), ("Sold", True),
-                                              ("Sold on Approval", True), ("Not Sold", False),
+@pytest.mark.parametrize(("status", "sold"), [(None, False), ("Sold", True), ("SOLD", True),
+                                              ("Sold on Approval", False), ("Not sold", False),
                                               ("On Approval", False)])
 def test_only_a_sold_status_is_sold(status, sold):
     assert normalize_apibara({**APIBARA_LOT, "auction": {"last_sold_status": status}}).sold is sold

@@ -26,11 +26,21 @@ def apibara(lot, platform="copart", status="Sold", price=5000, at="2026-09-23T14
             **fields}
 
 
+def apiauctions(lot, price=5000, status="Sold", at=AUCTION + timedelta(minutes=5),
+                auction="COPART"):
+    """A lot as apiauctions returns it."""
+    return {"auction_name": auction, "lot_number": int(lot), "vin": f"VIN{lot}", "year": 2018,
+            "make": "VOLVO", "odometer": 50000, "primary_damage": "FRONT END",
+            "sales_history": [{"purchase_price": price, "sale_status": status,
+                               "sold": int(status == "Sold"), "sale_date": int(at.timestamp())}]}
+
+
 def ours(**values):
     """Our lot as report() reads it."""
     return {"lot_number": "1", "vin": "VIN1", "year": 2018, "make": "VOLVO", "odometer": 50000,
             "damage_primary": "FRONT END", "high_bid": 3000, "buy_it_now_price": 0,
-            "sale_at": AUCTION, "last_seen_at": AUCTION - timedelta(minutes=30), **values}
+            "sale_at": AUCTION, "last_seen_at": AUCTION - timedelta(minutes=30),
+            "removed_at": AUCTION + timedelta(hours=3), **values}
 
 
 def test_a_matching_sold_lot_passes_every_check():
@@ -68,6 +78,29 @@ def test_a_lot_sold_before_its_auction_sold_at_our_buy_it_now_price():
     assert check(record, {**seen, "buy_it_now_price": 7500}, "sold")["presale_at_buy_now"] is False
 
 
+@pytest.mark.parametrize(("status", "right"), [("Sold", False), ("Sold on Approval", True),
+                                               ("Not sold", True)])
+def test_a_lot_back_in_our_exports_after_its_auction_did_not_sell(status, right):
+    record = normalize_apibara(apibara("1", status=status))
+    relisted = ours(sale_at=AUCTION + timedelta(days=6), last_seen_at=AUCTION + timedelta(days=1),
+                    removed_at=None)
+    result = check(record, relisted, "sold")
+    assert result["relisted_not_sold"] is right
+    assert "sale_time" not in result  # its earlier auction time is no longer ours
+    # Gone after that later auction: it sold there, and the API's sale time is wrong.
+    result = check(record, {**relisted, "removed_at": AUCTION + timedelta(days=6, hours=3)},
+                   "sold")
+    assert "relisted_not_sold" not in result
+    assert result["sale_time"] is False
+
+
+def test_an_active_lot_is_checked_on_its_next_auction():
+    record = auction_apis.normalize_apiauctions({
+        **apiauctions("1", status="Not sold", at=AUCTION - timedelta(days=7)),
+        "active_bidding": [{"sale_date": int(AUCTION.timestamp()) * 1000, "current_bid": 0}]})
+    assert check(record, ours(), "active")["sale_time"] is True
+
+
 def test_an_active_lot_is_checked_on_its_sale_time_and_buy_it_now_price():
     record = normalize_apibara(apibara("1", status=None, price=0, buy_now=9000,
                                        at="2026-09-23T14:30:00+00:00"))
@@ -87,8 +120,20 @@ def test_cross_compares_the_lots_both_apis_list():
     a = [normalize_apibara(apibara("1")), normalize_apibara(apibara("2"))]
     b = [normalize_apibara(apibara("1")), normalize_apibara(apibara("2", price=5100)),
          normalize_apibara(apibara("3"))]
-    assert cross(a, b) == {"overlap": 0.6667, "same_price": 0.5, "same_vin": 1.0}
+    assert cross(a, b) == {"overlap": 0.6667, "same_status": 1.0, "same_price": 0.5,
+                           "same_vin": 1.0}
     assert cross([], []) == {"overlap": None}
+
+
+def test_sold_lots_are_compared_on_the_lots_either_api_says_sold():
+    def lot(number, status):
+        return normalize_apibara(apibara(number, status=status, price=0))
+
+    a = [lot("1", "Sold"), lot("2", "Not sold"), lot("4", "Sold")]
+    b = [lot("1", "Sold"), lot("3", "Not sold"), lot("4", "Not sold"), lot("5", None)]
+    assert cross(a, b, sold_only=True) == {"overlap": 1.0, "same_status": 0.5, "same_vin": 1.0}
+    assert cross(a, b)["overlap"] == 0.4  # unsold lots one API leaves out
+    assert "same_status" not in cross([lot("5", None)], [lot("5", "Sold")])  # status unknown
 
 
 def test_manual_prices_are_compared_where_filled_in():
@@ -108,10 +153,10 @@ def run_dir(tmp_path):
     return folder
 
 
-def save(run_dir, api, slice_name, lots, page=1, meta=None):
+def save(run_dir, api, slice_name, lots, page=1):
     path = run_dir / api / slice_name / f"{page}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"data": lots, "meta": meta or {}}))
+    path.write_text(json.dumps({"data" if api == "apibara" else "result": lots}))
 
 
 def fake_api(monkeypatch, pages_per_slice=2):
@@ -169,8 +214,8 @@ def test_slice_requests(monkeypatch):
 
 
 def test_apiauctions_pages_until_the_last_one():
-    assert api_check._apiauctions_next({"meta": {"last_page": 2}}, None) == 2
-    assert api_check._apiauctions_next({"meta": {"last_page": 2}}, 2) is None
+    assert api_check._apiauctions_next({"pagination": {"total_pages": 2}}, None) == 2
+    assert api_check._apiauctions_next({"pagination": {"total_pages": 2}}, 2) is None
     assert api_check._apiauctions_next({}, None) is None
 
 
@@ -184,7 +229,9 @@ def test_load_counts_a_lot_on_two_pages_once(run_dir):
 
 
 def insert_lot(conn, lot, **values):
-    row = {"vin": f"VIN{lot}", "year": 2018, "make": "VOLVO", "odometer": 50000,
+    sale_date = values.get("sale_at", AUCTION).date()  # Copart's own (US) date
+    row = {"sale_date": sale_date, "vin": f"VIN{lot}", "year": 2018, "make": "VOLVO",
+           "odometer": 50000,
            "damage_primary": "FRONT END", "high_bid": 3000, "buy_it_now_price": 0,
            "sale_at": AUCTION, "last_seen_at": AUCTION - timedelta(minutes=30),
            "removed_at": AUCTION + timedelta(hours=3), **values}
@@ -206,19 +253,22 @@ def checked_run(conn, run_dir):
     insert_lot(conn, "5", sale_at=datetime(2026, 9, 30, 15, tzinfo=UTC),
                last_seen_at=datetime.now(UTC), removed_at=None)  # upcoming
     insert_lot(conn, "6", make="AUDI")  # another make: not in the run
+    insert_lot(conn, "7", sale_at=datetime(2026, 10, 1, 1, tzinfo=UTC), sale_date=date(2026, 9, 30),
+               last_seen_at=datetime.now(UTC), removed_at=None)  # a night auction on 09-30
     save(run_dir, "apibara", "copart-sold", [
         apibara("1"), apibara("3", vin="OTHER", price=2000),
         apibara("4", price=7000, at="2026-09-23T11:00:00+00:00"),
         apibara("9")])  # a yard we do not download
     save(run_dir, "apibara", "copart-active", [
-        apibara("5", status=None, price=0, at="2026-09-30T15:00:00+00:00")])
+        apibara("5", status=None, price=0, at="2026-09-30T15:00:00+00:00"),
+        apibara("7", status=None, price=0, at="2026-10-01T01:00:00+00:00")])
     save(run_dir, "apibara", "iaai-sold", [
         apibara("100", platform="iaai", price=3000, bid=2500),
         apibara("101", platform="iaai", status="Not Sold", price=0),
         apibara("102", platform="iaai", price=400, bid=11200)])  # below its own bid
-    save(run_dir, "apiauctions", "copart-sold", [
-        {"lot_number": "1", "vin": "VIN1", "auction": "COPART", "make": "VOLVO",
-         "sale_price": 5000, "auction_date": "2026-09-23T14:05:00Z"}])
+    save(run_dir, "apiauctions", "copart-sold", [apiauctions("1"), apiauctions("3", price=3100)])
+    save(run_dir, "apiauctions", "iaai-sold", [
+        apiauctions("100", price=2900, status="Not sold", auction="IAAI")])
     return run_dir
 
 
@@ -231,14 +281,17 @@ def test_report_measures_each_api_against_our_lots(conn, checked_run):
     assert (sold["checks"]["sale_time"], sold["checks"]["presale_at_buy_now"]) == (1.0, 1.0)
     assert (sold["price_present"], sold["price_at_least_bid"]) == (1.0, None)
     active = summary["apis"]["apibara"]["copart-active"]
-    assert (active["ours"], active["ours_in_api"], active["checks"]["sale_time"]) == (1, 1.0, 1.0)
+    assert (active["ours"], active["ours_in_api"], active["checks"]["sale_time"]) == (2, 1.0, 1.0)
     iaai = summary["apis"]["apibara"]["iaai-sold"]
     assert (iaai["lots"], iaai["price_present"], iaai["price_at_least_bid"]) == (3, 1.0, 0.5)
     assert iaai["statuses"] == {"Sold": 2, "Not Sold": 1}
     assert "ours" not in iaai
     assert iaai["fields"]["final_price"] == 0.6667
-    assert summary["cross"]["copart-sold"] == {"overlap": 0.25, "same_price": 1.0,
-                                               "same_vin": 1.0}
+    assert summary["cross"]["copart-sold"] == {"overlap": 0.5, "same_status": 1.0,
+                                               "same_price": 0.5, "same_vin": 0.5}
+    assert summary["cross"]["iaai-sold"] == {"overlap": 0.5, "same_status": 0.0,
+                                             "same_vin": 1.0}
+    assert summary["apis"]["apiauctions"]["copart-sold"]["checks"]["price_at_least_prebid"] == 1
     assert summary["cross"]["iaai-active"] == {"overlap": None}
 
     with (checked_run / "mismatches.csv").open() as f:
@@ -247,6 +300,8 @@ def test_report_measures_each_api_against_our_lots(conn, checked_run):
     assert problems[("apibara", "3")] == "vin,price_at_least_prebid"
     assert problems[("apibara", "102")] == "price_below_its_bid"
     assert problems[("apibara", "9")] == "not_in_ours"
+    assert problems[("apibara vs apiauctions", "3")] == "other_api_price:3100"
+    assert problems[("apibara vs apiauctions", "100")] == "other_api_status:Not sold"
     assert json.loads((checked_run / "summary.json").read_text())["run"] == RUN
 
 
@@ -255,21 +310,22 @@ def test_report_writes_a_spot_check_list_then_compares_it(conn, checked_run):
     manual = checked_run / "manual.csv"
     with manual.open() as f:
         rows = list(csv.DictReader(f))
-    # Doubtful prices first, then lots both APIs list; lots that did not sell are left out.
+    # Doubtful prices (below a bid, or the APIs disagree) first, then lots both APIs list;
+    # lots that did not sell are left out.
     assert [(r["source"], r["lot_number"]) for r in rows] == [
         ("copart", "3"), ("copart", "1"), ("copart", "4"), ("copart", "9"),
-        ("iaai", "102"), ("iaai", "100")]
+        ("iaai", "100"), ("iaai", "102")]
     assert rows[1]["url"] == "https://www.copart.com/lot/1"
-    assert rows[5]["url"] == ""
+    assert rows[4]["url"] == ""
 
-    rows[1]["final_price"], rows[5]["final_price"] = "5,000", "2900"
+    rows[1]["final_price"], rows[4]["final_price"] = "5,000", "2900"
     with manual.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
     summary = api_check.report(conn, checked_run)
     assert summary["manual"] == {"apibara": {"checked": 2, "same_price": 0.5},
-                                 "apiauctions": {"checked": 1, "same_price": 1.0}}
+                                 "apiauctions": {"checked": 2, "same_price": 0.5}}
     text = api_check.render(summary)
     assert "    ours_in_api: 66.7% BELOW 95%" in text
     assert "    price_present: 100.0% ok" in text
