@@ -228,7 +228,10 @@ ones, for the model to learn from. It is run by hand and spends requests ($0.01 
    `vehicle_type` (`AUTOMOBILE` → `V`), `title_type` (a state's title description →
    `SC`, `ST`, `CT`, …) and `runs_drives` (`RUNS AND DRIVES` → `Run & Drive Verified`). A value
    needs 3 lots and 80 % agreement; the tables go to `apiauctions_codes.json` (committed). A
-   value without a translation is stored as NULL. The other columns share Copart's wording.
+   title's wording is also learned without its state (`* - CERTIFICATE OF TITLE (P)` → `CT`),
+   for the states the sample missed, when every state using it agrees: 95 % of imported Copart
+   lots get a title, against 77 % from the exact wording alone. A value without a translation
+   is stored as NULL. The other columns share Copart's wording.
 3. `load` (offline, rerunnable) writes each day in one transaction under the loader's lock. A
    lot no export brought is inserted as finished: removed at its latest sale, first seen when
    apiauctions listed it, `attributes` its flattened raw record, no file ids (`last_file_id IS

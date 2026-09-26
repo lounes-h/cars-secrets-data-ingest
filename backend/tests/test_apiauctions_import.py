@@ -66,6 +66,12 @@ def test_an_unsold_lot_has_no_final_price_and_unknown_wording_no_code():
     assert row["first_seen_at"] == NIGHT_SALE  # no listing time: the sale's
 
 
+def test_a_title_from_a_state_calibration_never_saw_uses_its_wording_in_any_state():
+    codes = {"title_type": {"* - CERTIFICATE OF TITLE (P)": "CT"}}
+    assert to_lot(car("1", doc_type="TN - CERTIFICATE OF TITLE (P)"), codes)["title_type"] == "CT"
+    assert to_lot(car("1", doc_type="CERTIFICATE OF TITLE (P)"), codes)["title_type"] is None
+
+
 def test_an_iaa_lot_keeps_its_own_wording():
     row = to_lot(car("45665915", auction="IAAI", doc_type="SALVAGE", vehicle_type="SUV"), CODES)
     assert (row["source"], row["vehicle_type"], row["title_type"], row["runs_drives"]) == (
@@ -180,13 +186,20 @@ def test_calibrate_learns_the_codes_our_export_gives_the_same_lots(conn):
     export_lot(conn, "11", title_type="ST")
     export_lot(conn, "12", title_type="SV")
     export_lot(conn, "20", runs_drives="DEFAULT")
+    export_lot(conn, "30", title_type="CT")
+    export_lot(conn, "31", title_type="CT")
+    export_lot(conn, "32", title_type="CT")
     cars = [car(n) for n in range(4)] + [
         car("10", doc_type="VA - TITLE"), car("11", doc_type="VA - TITLE"),
         car("12", doc_type="VA - TITLE"),  # 2 of 3 agree: under 80 %
-        car("20", highlights=None), car("99")]  # 99: not one of ours
+        car("20", highlights=None), car("99"),  # 99: not one of ours
+        car("30", doc_type="AL - TITLE (P)"), car("31", doc_type="MA - TITLE (P)"),
+        car("32", doc_type="TN - TITLE (P)")]
     tables = calibrate(conn, cars)
     assert tables["vehicle_type"] == {"AUTOMOBILE": "V"}
-    assert tables["title_type"] == {"NC - SALVAGE CERTIFICATE OF TITLE": "SC"}
+    assert tables["title_type"] == {"NC - SALVAGE CERTIFICATE OF TITLE": "SC",
+                                    "* - SALVAGE CERTIFICATE OF TITLE": "SC",
+                                    "* - TITLE (P)": "CT"}  # 1 lot in each of 3 states
     assert tables["runs_drives"] == {"RUNS AND DRIVES": "Run & Drive Verified"}  # "" seen once
 
 

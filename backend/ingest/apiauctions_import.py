@@ -131,7 +131,9 @@ def calibrate(conn: Connection, cars: Iterable[Mapping[str, Any]]) -> dict[str, 
         seen: dict[str, Counter] = defaultdict(Counter)
         for row in ours:
             if row[column] is not None:
-                seen[by_lot[row["lot_number"]].get(field) or ""][row[column]] += 1
+                value = by_lot[row["lot_number"]].get(field) or ""
+                for key in {value, _any_state(value)} - {None}:
+                    seen[key][row[column]] += 1
         tables[column] = {
             value: code for value, codes in sorted(seen.items())
             for code, n in codes.most_common(1)
@@ -146,6 +148,13 @@ def flatten(value: Any, prefix: str = "") -> dict[str, str]:
         return {k: v for key, item in items
                 for k, v in flatten(item, f"{prefix}.{key}" if prefix else str(key)).items()}
     return {} if value is None else {prefix: str(value)}
+
+
+def _any_state(text: str) -> str | None:
+    """`NC - SALVAGE CERTIFICATE` -> `* - SALVAGE CERTIFICATE`: a title's wording in any state,
+    translated only when every state using it agrees."""
+    state = _state(text)
+    return None if state is None else "*" + text[len(state):]
 
 
 def _state(text: str) -> str | None:
@@ -165,7 +174,10 @@ def to_lot(car: Mapping[str, Any], codes: Mapping[str, Mapping[str, str]]) -> di
 
     def translated(column: str) -> Any:
         value = car.get(TRANSLATED[column])
-        return codes.get(column, {}).get(value or "") if copart else value
+        if not copart:
+            return value
+        table = codes.get(column, {})
+        return table.get(value or "", table.get(_any_state(value or "") or ""))
 
     location, title = car.get("location") or "", car.get("doc_type") or ""
     try:
