@@ -29,7 +29,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `parsing.py` | Streaming CSV parser: header normalization, row validation, typed conversion, row hash |
 | `loader.py` | The single load transaction: staging, change detection, history, upsert, removals, registry |
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
-| `pricing.py` | Final price model: training file with generated sold prices, XGBoost training, pricing the active lots |
+| `pricing.py` | Final price model: one vocabulary for Copart and IAA, the cleaned training and test files of real sale prices, XGBoost training, pricing the active lots |
 | `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
 | `apiauctions_import.py`, `apiauctions_codes.json` | Real sale prices from apiauctions into `lots` (`final_price`), and the translations of its wording into our Copart codes |
 | `providers/` | Everything provider-specific (see below) |
@@ -159,18 +159,20 @@ transaction.
 ## Price model
 
 `pricing.py` predicts each active lot's final auction price with XGBoost; `api_sync` serves it as
-`predicted_final_price`. **No sold prices exist yet**: the training target is generated
-(`pricing.synthesize`: retail value discounted for damage, title, condition, age and mileage,
-less part of the repair cost, with noise), so predictions only exercise the pipeline until real
-sale prices replace it in the same training file.
+`predicted_final_price`. It learns from real sale prices, `lots.final_price` (see the
+apiauctions import below), of Copart and IAA sales together.
 
-1. `python -m ingest.pricing synth` writes `data/training/lots.csv.gz`: the most recent 300k
-   lots, removed ones included, with only the model's columns (`pricing.COLUMNS`: no ids, VINs,
-   URLs or addresses) plus `final_bid_sale`.
-2. `python -m ingest.pricing train <file>` fits 70 %, stops early on 15 %, prints MAE, MAPE and
-   R² on the last 15 % next to a naive baseline (median price/retail ratio), and saves
-   `data/models/final_price.ubj`. Categories seen in fewer than 50 training rows count as
-   missing: every categorical split lists its categories, and keeping rare makes and models
+1. `python -m ingest.pricing export [--sources copart,iaai]` writes `data/training/lots.csv.gz`
+   and `data/training/test.csv.gz`: the priced lots with only the model's columns
+   (`pricing.COLUMNS` + `source`; no ids, VINs, URLs or addresses) plus `final_bid_sale`. It
+   drops prices under Copart's $25 minimum bid, impossible model years, a lot our export lists
+   again after its sale (the sale fell through), and all but the latest sale of a car (VIN).
+   Our own exported lots with a price are the **test set**: a later period, through exactly the
+   export pipeline the served predictions use, never trained on.
+2. `python -m ingest.pricing train <file> --test <file>` fits 70 %, stops early on 15 %, and
+   prints MAE, median error, MAPE and R² on the last 15 % and on the test set, next to a naive
+   baseline (median price/retail ratio). Categories seen in fewer than 50 training rows count
+   as missing: every categorical split lists its categories, and keeping rare makes and models
    made the model 240 MB instead of 30 MB. The kept categories are stored in the model, and
    values it never saw are priced as missing.
 3. Before each API sync, the worker prices the active lots not yet priced by this model at
@@ -178,10 +180,29 @@ sale prices replace it in the same training file.
    lock, and gives each batch a new `sync_version` so the sync copies it. The model is
    identified by its file's sha256, so replacing the file reprices every lot. Without the file
    (`PRICE_MODEL_PATH`, default `/data/models/final_price.ubj`) nothing is priced and the column
-   stays NULL. A failure raises `pricing_failed` (warning) and never holds up the sync.
+   stays NULL. A failure raises `pricing_failed` (warning) and never holds up the sync. A model
+   file only fits the code whose features it was trained on: deploy them together.
 
-On the ~240k lots of 2026-09-23: MAE $493 against $2,032 for the baseline, R² 0.92, 7 s of
-training. Pricing all 148k active lots takes 12 s, and a refresh with nothing to do 0.5 s.
+**Features.** Numbers: model year, age at sale, odometer and retail value (0, or Copart's
+999,999, is unknown). Categories: auction (`source`), make, model, body, vehicle type, primary
+and secondary damage, title, keys, run condition, drive, fuel, transmission, cylinders and
+state. Not repair cost, pre-auction bid, Buy It Now price or odometer brand: apiauctions has
+none of them for a sold lot, so the model could not learn them.
+
+**One vocabulary.** Copart and IAA word most columns differently; `pricing.normalize` maps both
+(and so our exports at pricing time) onto one set of values: the model is make + the model's
+first word (`CAMRY HYB` and `Camry Hybrid` are one), titles are grouped (clean, salvage,
+rebuilt, non-repairable, bill of sale; Copart's codes by the wording apiauctions shows for
+them), damage by kind (`Left Front` and `FRONT END` are front), and body, drive, fuel,
+transmission, cylinders, keys, run condition and vehicle type into Copart's classes. Median
+price/retail is the same in both auctions (22.4 % and 22.5 %).
+
+On 2026-09-25, trained on 89k sales (59.8k Copart, 29.3k IAA; 3 s, 310 trees), on the test set
+of 5,516 Sept Copart lots: MAE $1,601, median error $752, half the lots within 31 % of their
+price, R² 0.73; the baseline's MAE $2,204, the synthetic model's (generated prices, still live)
+$2,099 and R² 0.47. The error is largest in relative terms on lots under $500 (median 96 %) and
+where the retail value is unknown (37 % of the test lots: MAE $1,900 against $1,425). Trained on
+Copart alone: MAE $1,577, R² 0.76; IAA sales do not change Copart prices much either way.
 
 ### Real sale prices: checking the third-party APIs
 

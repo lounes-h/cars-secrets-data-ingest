@@ -74,9 +74,11 @@ def test_a_title_from_a_state_calibration_never_saw_uses_its_wording_in_any_stat
 
 
 def test_an_iaa_lot_keeps_its_own_wording():
-    row = to_lot(car("45665915", auction="IAAI", doc_type="SALVAGE", vehicle_type="SUV"), CODES)
+    row = to_lot(car("45665915", auction="IAAI", doc_type="SALVAGE", vehicle_type="SUV",
+                     location="Philadelphia (PA)"), CODES)
     assert (row["source"], row["vehicle_type"], row["title_type"], row["runs_drives"]) == (
         "iaai", "SUV", "SALVAGE", "RUNS AND DRIVES")
+    assert (row["yard_name"], row["location_state"]) == ("Philadelphia (PA)", "PA")
 
 
 def test_a_lot_without_a_past_sale_is_not_loaded():

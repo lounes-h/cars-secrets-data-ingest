@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import time
 import urllib.error
 from collections import Counter, defaultdict
@@ -186,6 +187,12 @@ def _state(text: str) -> str | None:
     return state if dash and len(state) == 2 else None
 
 
+def _location_state(location: str) -> str | None:
+    """The yard's state: Copart writes `MA - NORTH BOSTON`, IAA `Philadelphia (PA)`."""
+    match = re.search(r"\(([A-Z]{2})\)$", location)
+    return _state(location) or (match.group(1) if match else None)
+
+
 def to_lot(car: Mapping[str, Any], codes: Mapping[str, Mapping[str, str]]) -> dict[str, Any] | None:
     """The `lots` row of one apiauctions lot, or None when it has no past sale yet."""
     sales = sorted(car.get("sales_history") or [], key=lambda s: s.get("sale_date") or 0)
@@ -223,7 +230,8 @@ def to_lot(car: Mapping[str, Any], codes: Mapping[str, Mapping[str, str]]) -> di
         "runs_drives": translated("runs_drives"),
         "buy_it_now_price": auction_apis.money((car.get("buy_now_car") or {})
                                                .get("purchase_price")),
-        "currency": "USD", "location_state": _state(location), "seller_name": car.get("seller"),
+        "currency": "USD", "location_state": _location_state(location),
+        "seller_name": car.get("seller"),
         "source_created_at": created.replace(tzinfo=None),
     }
     return {
