@@ -31,6 +31,8 @@ docker compose run --rm worker python -m ingest.pricing train /data/training/lot
 docker compose run --rm worker python -m ingest.api_check fetch --sold-date 2026-09-23 \
     --active-date 2026-09-30 --make VOLVO     # sale-price APIs: save one run's pages (keys in .env)
 docker compose run --rm worker python -m ingest.api_check report /data/checks/<run>  # offline
+docker compose run --rm worker python -m ingest.apiauctions_import fetch   # spends the credit
+docker compose run --rm worker python -m ingest.apiauctions_import calibrate|load   # offline
 (cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
 # backend (from backend/)
@@ -110,7 +112,11 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   sees the change.
 - **Price model** (`pricing.py`, see `docs/architecture.md`): XGBoost predicts each active
   lot's final price, served as `predicted_final_price`. The training target is **generated**
-  (`synthesize`) until real sale prices exist; keep synthetic models out of production. The
+  (`synthesize`) until the model trains on real sale prices; keep synthetic models out of
+  production. Real prices are in `lots.final_price`, loaded from apiauctions by
+  `apiauctions_import.py` (see `docs/architecture.md`): not a canonical column, so the loader
+  never writes it. Imported lots have no file ids (`last_file_id IS NULL`), are removed at their
+  sale, and never reach the API database. The
   worker prices lots right before each API sync: those not yet priced by the current model file
   (sha256) at their current `sync_version`, in batches under the loader's lock, each batch
   drawing a new `sync_version`. No model file = no prices; a failure raises `pricing_failed`

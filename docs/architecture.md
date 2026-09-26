@@ -31,6 +31,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
 | `pricing.py` | Final price model: training file with generated sold prices, XGBoost training, pricing the active lots |
 | `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
+| `apiauctions_import.py`, `apiauctions_codes.json` | Real sale prices from apiauctions into `lots` (`final_price`), and the translations of its wording into our Copart codes |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -42,7 +43,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | Table | Holds |
 |---|---|
 | `ingest_files` | One row per file received: status, counts, removed lot numbers, duration, header, error, archive path |
-| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version`, and the price prediction (`predicted_final_price`, `prediction_model`, `predicted_version`) |
+| `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version`, the price prediction (`predicted_final_price`, `prediction_model`, `predicted_version`), and the price it sold for (`final_price`, from apiauctions) |
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
@@ -212,6 +213,34 @@ one sold before it, and gives a Buy Now sale's price only as `buy_now_usd`. apia
 `data`, `meta` and 100); a lot keeps only its latest sale in `sales_history` ("Sold" or
 "Not sold", the price, epoch seconds; an unsold lot carries the refused bid) and a later
 auction in `active_bidding` (epoch milliseconds).
+
+### Real sale prices: the apiauctions import
+
+`python -m ingest.apiauctions_import` puts apiauctions' sales into `lots`, next to the exported
+ones, for the model to learn from. It is run by hand and spends requests ($0.01 each, 50 lots).
+
+1. `fetch` saves raw pages under `data/apiauctions/<AUCTION>/<day>/<page>.json`, never twice.
+   It first reads 9 pages a day of Copart's sales of 2026-09-18 to 09-24, which our own lots
+   also cover, then every US Copart and IAAI lot from `--start` (2026-08-25) back one day at a
+   time, until the credit runs out (402). A weekday is ~16–25k Copart lots (half of them not
+   sold, relisted), so ~900 requests with IAA; a weekend day a few hundred lots.
+2. `calibrate` learns how apiauctions words three Copart columns, from the lots both have:
+   `vehicle_type` (`AUTOMOBILE` → `V`), `title_type` (a state's title description →
+   `SC`, `ST`, `CT`, …) and `runs_drives` (`RUNS AND DRIVES` → `Run & Drive Verified`). A value
+   needs 3 lots and 80 % agreement; the tables go to `apiauctions_codes.json` (committed). A
+   value without a translation is stored as NULL. The other columns share Copart's wording.
+3. `load` (offline, rerunnable) writes each day in one transaction under the loader's lock. A
+   lot no export brought is inserted as finished: removed at its latest sale, first seen when
+   apiauctions listed it, `attributes` its flattened raw record, no file ids (`last_file_id IS
+   NULL` tells them apart); a rerun refreshes those rows (new `sync_version`). A lot an export
+   brought keeps every column and only gets `final_price`. Lots without a past sale are skipped.
+   `sale_date` is the sale's US Eastern date, like Copart's.
+
+`final_price` is the price the lot sold for, NULL when it did not sell or is unknown. It is not a
+canonical column, so the loader never overwrites it, and it is not served. apiauctions has no
+repair cost, odometer brand or pre-auction bid for a sold lot: those stay NULL on imported rows.
+Imported lots count in the dashboard's All and Removed totals and show on the Lots page; the API
+database never gets them (removed long before the sync's 4 h window).
 
 ## What a run did
 

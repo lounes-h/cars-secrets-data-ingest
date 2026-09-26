@@ -44,7 +44,10 @@ timeout. The CSP `img-src` allows that image host and nothing else, and images l
 `apibara.tech` and `apiauctions.io` over HTTPS with the keys `APIBARA_API_KEY` and
 `APIAUCTIONS_TOKEN`, which live in `.env` only and are passed to the backend containers by
 Compose. Their answers are saved under `data/checks/` (git-ignored) and treated as data. They
-include VINs, which are also in our own exports.
+include VINs, which are also in our own exports. `python -m ingest.apiauctions_import` (also by
+hand) calls `apiauctions.io` with the same token and saves its pages under `data/apiauctions/`
+(git-ignored); the lots it loads keep only the raw record's text in `attributes`, rendered as
+text like any source value. Its pages include buyer ids and states, never names.
 
 ## Copart session (downloader)
 
