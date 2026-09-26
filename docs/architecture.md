@@ -237,7 +237,8 @@ ones, for the model to learn from. It is run by hand and spends requests ($0.01 
    apiauctions listed it, `attributes` its flattened raw record, no file ids (`last_file_id IS
    NULL` tells them apart); a rerun refreshes those rows (new `sync_version`). A lot an export
    brought keeps every column and only gets `final_price`. Lots without a past sale are skipped.
-   `sale_date` is the sale's US Eastern date, like Copart's.
+   `sale_date` is the sale's US Eastern date, like Copart's. Each day's commit sends a
+   `lots_imported` event, so the dashboard's lot totals and lists refresh.
 
 `final_price` is the price the lot sold for, NULL when it did not sell or is unknown. It is not a
 canonical column, so the loader never overwrites it, and it is not served. apiauctions has no

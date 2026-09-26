@@ -254,6 +254,15 @@ def test_a_reload_refreshes_only_lots_no_export_brought(conn, tmp_path):
     assert load(conn, tmp_path, codes)["refreshed"] == 0  # nothing changed
 
 
+def test_load_tells_the_dashboard_the_lot_totals_changed(conn, db_url, tmp_path):
+    save(tmp_path, "COPART", "2026-08-19", [car("2")])
+    with psycopg.connect(db_url, autocommit=True) as listener:
+        listener.execute(f"LISTEN {db.EVENTS_CHANNEL}")
+        load(conn, tmp_path, CODES)
+        events = [json.loads(n.payload) for n in listener.notifies(timeout=2, stop_after=1)]
+    assert events == [{"type": "lots_imported", "new": 1, "priced": 0, "refreshed": 0}]
+
+
 def test_the_api_database_never_gets_imported_lots(conn, tmp_path, api_url):
     save(tmp_path, "COPART", "2026-08-19", [car("2")])
     load(conn, tmp_path, CODES)

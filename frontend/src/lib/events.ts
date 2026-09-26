@@ -2,7 +2,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 export interface PipelineEvent {
-  type: "run_started" | "run_finished" | "alert" | "alert_resolved" | "alert_updated" | "downloader";
+  type: "run_started" | "run_finished" | "alert" | "alert_resolved" | "alert_updated" | "downloader"
+    | "lots_imported";
   [key: string]: unknown;
 }
 
@@ -15,6 +16,8 @@ export function queriesFor(event: PipelineEvent): string[][] {
               ["downloader"]];
     case "downloader":
       return [["downloader"], ["overview"]];
+    case "lots_imported":  // sale prices loaded from apiauctions (apiauctions_import.py)
+      return [["overview"], ["lots"], ["lot"]];
     case "alert":
     case "alert_resolved":
     case "alert_updated":

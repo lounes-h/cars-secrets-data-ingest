@@ -38,6 +38,7 @@ from psycopg import Connection
 from . import auction_apis
 from .auction_apis import epoch
 from .config import get_settings
+from .db import notify
 from .loader import NEXT_SYNC_VERSION
 from .schema import CANONICAL_COLUMNS, COLUMN_NAMES
 
@@ -225,7 +226,8 @@ _S_TYPED = ", ".join(f"s.{name}" for name in COLUMN_NAMES)
 
 def write(conn: Connection, rows: list[dict[str, Any]]) -> dict[str, int]:
     """One transaction under the loader's lock: insert new lots as finished ones, set
-    `final_price` on every lot, refresh the lots only this import wrote. `conn` autocommits."""
+    `final_price` on every lot, refresh the lots only this import wrote, tell the dashboard.
+    `conn` autocommits."""
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('ingest:lots'))")
         conn.execute(f"CREATE TEMP TABLE import_stage ({_STAGE}) ON COMMIT DROP")
@@ -254,7 +256,9 @@ def write(conn: Connection, rows: list[dict[str, Any]]) -> dict[str, int]:
                   AND l.last_file_id IS NULL
                   AND ({', '.join(f'l.{n}' for n in COLUMN_NAMES)}, l.attributes, l.removed_at)
                       IS DISTINCT FROM ({_S_TYPED}, s.attributes, s.sold_at)""").rowcount
-    return {"new": new, "priced": priced, "refreshed": refreshed}
+        counts = {"new": new, "priced": priced, "refreshed": refreshed}
+        notify(conn, "lots_imported", **counts)  # the dashboard's lot totals and lists
+    return counts
 
 
 def load(conn: Connection, out: Path, codes: Mapping[str, Mapping[str, str]]) -> Counter:
