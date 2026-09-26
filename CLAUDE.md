@@ -31,6 +31,8 @@ docker compose run --rm worker python -m ingest.pricing train /data/training/lot
 docker compose run --rm worker python -m ingest.api_check fetch --sold-date 2026-09-23 \
     --active-date 2026-09-30 --make VOLVO     # sale-price APIs: save one run's pages (keys in .env)
 docker compose run --rm worker python -m ingest.api_check report /data/checks/<run>  # offline
+docker compose run --rm worker python -m ingest.apiauctions_import fetch   # spends the credit
+docker compose run --rm worker python -m ingest.apiauctions_import calibrate|load   # offline
 (cd backend && .venv/bin/python -m ingest.downloader login|run --force|status|daemon)
 
 # backend (from backend/)
@@ -110,7 +112,11 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   sees the change.
 - **Price model** (`pricing.py`, see `docs/architecture.md`): XGBoost predicts each active
   lot's final price, served as `predicted_final_price`. The training target is **generated**
-  (`synthesize`) until real sale prices exist; keep synthetic models out of production. The
+  (`synthesize`) until the model trains on real sale prices; keep synthetic models out of
+  production. Real prices are in `lots.final_price`, loaded from apiauctions by
+  `apiauctions_import.py` (see `docs/architecture.md`): not a canonical column, so the loader
+  never writes it. Imported lots have no file ids (`last_file_id IS NULL`), are removed at their
+  sale, and never reach the API database. The
   worker prices lots right before each API sync: those not yet priced by the current model file
   (sha256) at their current `sync_version`, in batches under the loader's lock, each batch
   drawing a new `sync_version`. No model file = no prices; a failure raises `pricing_failed`
@@ -280,13 +286,16 @@ A code change is not considered complete until the relevant unit tests have been
   checking that automated downloads are allowed.
 - Final price model built and served (`predicted_final_price`), trained on generated sold
   prices only: MAE $493 against a $2,032 baseline on the synthetic target.
-- Real sale prices: apibara.tech and apiauctions.io are being checked (`api_check.py`, see
-  `docs/architecture.md`) before their prices train the model and IAA lots become a second
-  provider (Copart stays on the downloader). Run of 2026-09-25 (Volvo, sold 09-23, upcoming
-  09-30): both list 100 % of our Copart lots with right VINs and specs; apibara priced 5 of 50
-  sold Copart lots below a binding bid, apiauctions none; the two agree on 79 % of Copart
-  prices and 100 % of IAA prices. Choosing one waits on the manual spot check.
-- Not done yet: external alert channels, a second provider, real sale prices.
+- Real sale prices: apiauctions.io was chosen over apibara.tech (`api_check.py`: apibara priced
+  5 of 50 sold Copart lots below a binding bid, apiauctions none). `apiauctions_import.py` spent
+  the $25 credit (2,516 requests) on 2026-09-25: every US Copart and IAAI lot of Aug 21–25,
+  about 2/3 of Copart's Aug 20, and a calibration sample of Copart's Sept 18–24. `lots` now has
+  103.5k imported lots (64.7k Copart, 92.7 % sold; 38.8k IAA, 75.5 % sold) and final prices on
+  94.8k lots, 5,552 of them our own export lots: none below our last pre-auction bid. The
+  account has a monthly spend cap (raised from $5 to $100). The model still trains on generated
+  prices; training on `final_price` is next.
+- Not done yet: external alert channels, a second provider (IAA sales are stored, not its
+  live lots), training the price model on real sale prices.
 
 ## Branching
 

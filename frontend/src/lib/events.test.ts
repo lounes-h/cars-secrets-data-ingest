@@ -14,6 +14,10 @@ describe("queriesFor", () => {
     }
   });
 
+  it("refreshes the lot totals, lists and details when sale prices are imported", () => {
+    expect(queriesFor({ type: "lots_imported" })).toEqual([["overview"], ["lots"], ["lot"]]);
+  });
+
   it("refreshes the downloader card on downloader events, and the overview on anything else", () => {
     expect(queriesFor({ type: "downloader" })).toEqual([["downloader"], ["overview"]]);
     expect(queriesFor({ type: "unknown" as never })).toEqual([["overview"]]);

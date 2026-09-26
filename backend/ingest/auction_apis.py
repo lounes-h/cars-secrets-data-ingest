@@ -84,7 +84,7 @@ def _time(value: Any) -> datetime | None:
     return moment if moment.tzinfo else None
 
 
-def _epoch(value: Any, per_second: int = 1) -> datetime | None:
+def epoch(value: Any, per_second: int = 1) -> datetime | None:
     try:
         return datetime.fromtimestamp(int(value) / per_second, UTC)
     except (TypeError, ValueError):
@@ -123,8 +123,8 @@ def normalize_apiauctions(car: Mapping[str, Any]) -> Record:
         damage=car.get("primary_damage"), has_keys=car.get("car_keys"),
         runs=car.get("highlights"), title=car.get("doc_type"),
         retail=money(car.get("est_retail_value")), status=last.get("sale_status"),
-        sale_at=_epoch(last.get("sale_date")),
+        sale_at=epoch(last.get("sale_date")),
         final_price=money(last.get("purchase_price")) if last.get("sold") else None,
         current_bid=money(bidding.get("current_bid")),
         buy_now=money((car.get("buy_now_car") or {}).get("purchase_price")),
-        next_sale_at=_epoch(bidding.get("sale_date"), 1000))
+        next_sale_at=epoch(bidding.get("sale_date"), 1000))
