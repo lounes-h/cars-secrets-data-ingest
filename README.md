@@ -10,8 +10,16 @@ dashboard.
 
 ## Run it
 
+With Docker running, start the service from the repository root:
+
 ```bash
 ./start.sh
+```
+
+To start the service and follow the worker and API logs:
+
+```bash
+./start.sh --logs
 ```
 
 Needs Docker with Compose v2, nothing else. On first run the script generates `.env` with
