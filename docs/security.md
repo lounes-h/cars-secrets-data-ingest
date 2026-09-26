@@ -38,6 +38,14 @@ image URLs on its image host (`cs.copart.com`). The response is capped at 2 MB w
 timeout. The CSP `img-src` allows that image host and nothing else, and images load with
 `referrerPolicy="no-referrer"`.
 
+## Auction data APIs
+
+`python -m ingest.api_check` (run by hand, never by the worker or the API) calls
+`apibara.tech` and `apiauctions.io` over HTTPS with the keys `APIBARA_API_KEY` and
+`APIAUCTIONS_TOKEN`, which live in `.env` only and are passed to the backend containers by
+Compose. Their answers are saved under `data/checks/` (git-ignored) and treated as data. They
+include VINs, which are also in our own exports.
+
 ## Copart session (downloader)
 
 The downloader keeps Copart's session cookie in a dedicated Chrome profile at

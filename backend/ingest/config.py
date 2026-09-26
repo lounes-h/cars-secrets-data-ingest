@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     api_sync_interval_seconds: float = 900.0
     # The final price model (pricing.py); without the file, lots are not priced.
     price_model_path: Path = Path("/data/models/final_price.ubj")
+    # Third-party auction data APIs with final sale prices (api_check.py). Empty = not used.
+    apibara_api_key: str = Field(default="", repr=False)
+    apiauctions_token: str = Field(default="", repr=False)
 
     # Comma-separated providers expected to deliver files; each is checked for staleness.
     enabled_providers: str = "copart"

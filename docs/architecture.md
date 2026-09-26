@@ -30,6 +30,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `loader.py` | The single load transaction: staging, change detection, history, upsert, removals, registry |
 | `api_sync.py` | Keeps the API's database in step: its tables, the incremental copy, the purge of finished auctions |
 | `pricing.py` | Final price model: training file with generated sold prices, XGBoost training, pricing the active lots |
+| `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -180,6 +181,37 @@ sale prices replace it in the same training file.
 
 On the ~240k lots of 2026-09-23: MAE $493 against $2,032 for the baseline, R² 0.92, 7 s of
 training. Pricing all 148k active lots takes 12 s, and a refresh with nothing to do 0.5 s.
+
+### Real sale prices: checking the third-party APIs
+
+apibara.tech and apiauctions.io index Copart and IAA lots with their final prices. Before their
+prices train the model (and IAA lots become a provider), `python -m ingest.api_check` measures
+them. A run holds four slices: the Copart and IAA lots of one make sold on one day, and those
+scheduled for a later day (our lots by Copart's own `sale_date`: a night auction at 01:00 UTC
+belongs to the US evening before). A slice is complete, so coverage can be measured, and small
+enough for a free quota (apibara: 100 requests a month, 20 lots a page). Fetch both APIs in
+the same run and report right after: lots get relisted and added every day.
+
+- `fetch` saves each raw page under `data/checks/<sold>_<active>_<make>/<api>/<slice>/` and
+  never requests a saved page again; an API without a key is skipped.
+- `report` runs offline. For Copart it compares every lot with ours: coverage both ways, VIN,
+  year, make, odometer, damage, the sale time (during its auction, 4 h, or before it but not
+  before we last saw it listed), that a lot listed again for a later auction is not called
+  sold, and the price, which can never be below the high bid of our last export (bids are
+  binding) nor below the API's own last bid. It compares the two APIs with each other (on the
+  lots either says sold, for sold slices: whether it sold, the price, the VIN) and with
+  `manual.csv`, where a person enters the final prices they read on copart.com / iaai.com.
+  Doubtful prices and lots the APIs disagree on head that list. It prints the shares with the
+  bar each must reach and writes `summary.json` and `mismatches.csv`.
+
+Only a "Sold" status counts as a sale. apibara's "Sold on Approval" is a bid awaiting the
+seller: on Copart most came back unsold, on IAA all were sold. apibara lists no unsold lots,
+reports the auction's start as `auction_at` for a lot sold at auction and the moment of sale for
+one sold before it, and gives a Buy Now sale's price only as `buy_now_usd`. apiauctions answers
+`{"result": [...], "pagination": {"total_pages": …}}` at 50 lots a page at most (its docs say
+`data`, `meta` and 100); a lot keeps only its latest sale in `sales_history` ("Sold" or
+"Not sold", the price, epoch seconds; an unsold lot carries the refused bid) and a later
+auction in `active_bidding` (epoch milliseconds).
 
 ## What a run did
 
