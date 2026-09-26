@@ -1,5 +1,6 @@
 """Real sale prices from apiauctions: fetching pages, learning translations, loading `lots`."""
 
+import io
 import json
 import urllib.error
 from datetime import UTC, date, datetime, timedelta
@@ -99,15 +100,19 @@ def test_the_plan_reads_calibration_days_then_goes_back_from_the_start():
 
 
 class FakeApi:
-    """apiauctions with `pages` pages a day; `fail` maps a request number to an HTTP status."""
+    """apiauctions with `pages` pages a day; `fail` maps a request number to an HTTP error: a
+    status, or (status, Retry-After, message)."""
 
     def __init__(self, pages=2, fail=None):
         self.pages, self.fail, self.calls = pages, fail or {}, []
 
     def __call__(self, token, endpoint, params):
         self.calls.append((params["auction_name"], params["auction_date_from"], params["page"]))
-        if (status := self.fail.pop(len(self.calls), None)) is not None:
-            raise urllib.error.HTTPError("https://apiauctions.io", status, "error", {}, None)
+        if (error := self.fail.pop(len(self.calls), None)) is not None:
+            status, wait, message = error if isinstance(error, tuple) else (error, None, None)
+            body = io.BytesIO(json.dumps({"message": message}).encode()) if message else None
+            raise urllib.error.HTTPError("https://apiauctions.io", status, "Too Many Requests",
+                                         {"Retry-After": wait} if wait else {}, body)
         assert (token, endpoint, params["per_page"]) == ("tok", "get-cars", 50)
         return {"result": [], "pagination": {"total": 50 * self.pages,
                                              "total_pages": self.pages}}
@@ -144,6 +149,18 @@ def test_fetch_stops_when_the_credit_runs_out_and_waits_when_rate_limited(
     assert "credit used up after 2 requests" in capsys.readouterr().out
 
 
+def test_fetch_hands_over_each_new_page_as_it_arrives(tmp_path, one_calibration_page):
+    class Api(FakeApi):
+        def __call__(self, token, endpoint, params):
+            return {**super().__call__(token, endpoint, params), "result": [car(len(self.calls))]}
+
+    pages = []
+    fetch("tok", tmp_path, date(2026, 8, 25), 2, Api(pages=1), pages.append)
+    assert [[c["lot_number"] for c in cars] for cars in pages] == [[1], [2]]
+    fetch("tok", tmp_path, date(2026, 8, 25), 1, Api(pages=1), pages.append)
+    assert len(pages) == 3  # the saved pages were not handed over again
+
+
 def test_fetch_waits_only_for_the_rest_of_each_second(tmp_path, monkeypatch,
                                                      one_calibration_page):
     waits, clock = [], iter([10.0, 10.25])  # the request took 0.25 s
@@ -151,6 +168,21 @@ def test_fetch_waits_only_for_the_rest_of_each_second(tmp_path, monkeypatch,
     monkeypatch.setattr(apiauctions_import.time, "monotonic", lambda: next(clock))
     fetch("tok", tmp_path, date(2026, 8, 25), 1, FakeApi())
     assert waits == [0.75]
+
+
+def test_fetch_stops_at_the_monthly_spend_cap_instead_of_waiting_days(
+        tmp_path, capsys, monkeypatch, one_calibration_page):
+    waits = []
+    monkeypatch.setattr(apiauctions_import.time, "sleep", waits.append)
+    api = FakeApi(pages=1, fail={2: (429, "5", None), 4: (429, "430452",
+                                                        "Monthly spend cap reached.")})
+    assert fetch("tok", tmp_path, date(2026, 8, 25), 100, api) == 2
+    assert 5 in waits  # a short Retry-After is waited out
+    assert "stopped after 2 requests: Monthly spend cap reached. (retry in 119 h)" in (
+        capsys.readouterr().out)
+    # Without a readable explanation, the status's reason stands in.
+    fetch("tok", tmp_path, date(2026, 8, 25), 100, FakeApi(fail={1: (429, "7200", None)}))
+    assert "stopped after 0 requests: Too Many Requests (retry in 2 h)" in capsys.readouterr().out
 
 
 def test_fetch_raises_other_errors(tmp_path):
@@ -280,10 +312,19 @@ def test_cli(conn, settings, tmp_path, monkeypatch, capsys, one_calibration_page
     monkeypatch.setattr(auction_apis, "apiauctions_page", api)
     monkeypatch.setattr(apiauctions_import, "get_settings",
                         lambda: settings.model_copy(update={"apiauctions_token": "tok"}))
+    monkeypatch.setattr(db, "get_settings", lambda: settings)
     apiauctions_import.main(["--dir", str(tmp_path), "fetch", "--max-requests", "3"])
     assert "3 requests" in capsys.readouterr().out
 
-    monkeypatch.setattr(db, "get_settings", lambda: settings)
+    # Each fetched page lands in lots at once: the dashboard follows the fetch.
+    sold = datetime(2026, 8, 24, 15, tzinfo=UTC)
+    monkeypatch.setattr(auction_apis, "apiauctions_page", lambda token, endpoint, params: {
+        "result": [car("7", sold_at=sold), car("8", auction="COPART UK")],
+        "pagination": {"total": 2, "total_pages": 1}})
+    apiauctions_import.main(["--dir", str(tmp_path), "fetch", "--max-requests", "1"])
+    assert lots(conn)["7"]["final_price"] == 5000
+    assert "8" not in lots(conn)  # not a US auction
+
     codes = tmp_path / "codes.json"
     monkeypatch.setattr(apiauctions_import, "CODES", codes)
     export_lot(conn, "1")

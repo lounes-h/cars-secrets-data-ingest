@@ -6,15 +6,18 @@
 
 `fetch` spends requests ($0.01 each, 50 lots per request). It first reads a few pages of the
 Copart sales we also have (CALIBRATION), then every US Copart and IAAI lot of `--start`, then of
-each day before it, until the credit runs out (402) or `--max-requests`. Each raw page is saved
-under `<dir>/<AUCTION>/<day>/<page>.json` and never requested again.
+each day before it, until the credit runs out (402), a 429 asks to wait more than
+MAX_WAIT (the account's monthly spend cap), or `--max-requests`. Each raw page is saved
+under `<dir>/<AUCTION>/<day>/<page>.json`, never requested again, and written into `lots` at
+once, so the dashboard follows the fetch.
 
 apiauctions words a few Copart columns differently from our export (`AUTOMOBILE` for `V`, a
 state's title description for `SC`, `RUNS AND DRIVES` for `Run & Drive Verified`). `calibrate`
 learns those translations from the lots both have and writes them to `apiauctions_codes.json`;
 a value it could not learn is stored as NULL (the raw value stays in `attributes`).
 
-`load` maps each lot onto the canonical columns and writes it as a finished lot: removed at its
+`load` writes every saved page again (after `calibrate`, say). A lot is mapped onto the
+canonical columns and written as a finished lot: removed at its
 latest sale, without file ids (no export brought it), `final_price` set only if it sold. A lot an
 export brought keeps its columns and only gets `final_price`.
 """
@@ -49,6 +52,7 @@ CALIBRATION = tuple(date(2026, 9, 18) + timedelta(days=d) for d in range(7))
 CALIBRATION_PAGES = 9
 PER_PAGE = 50  # the API's maximum
 PAUSE = 1.0  # at least this many seconds per request: the API allows 60 a minute
+MAX_WAIT = 300  # seconds a 429 may ask us to wait before fetch gives up instead
 CODES = Path(__file__).with_name("apiauctions_codes.json")
 # Our column <- the apiauctions field it is translated from (Copart only).
 TRANSLATED = {"vehicle_type": "vehicle_type", "title_type": "doc_type",
@@ -70,9 +74,10 @@ def plan(start: date) -> Iterator[tuple[str, date, int | None]]:
         day -= timedelta(days=1)
 
 
-def fetch(token: str, out: Path, start: date, budget: int, get: Get | None = None) -> int:
+def fetch(token: str, out: Path, start: date, budget: int, get: Get | None = None,
+          saved: Callable[[list[dict[str, Any]]], None] | None = None) -> int:
     """Saves the pages not saved yet, in `plan` order, until `budget` requests are spent or the
-    credit runs out (402). Returns the requests spent."""
+    credit runs out (402), handing each new page's lots to `saved`. Returns the requests spent."""
     get = get or auction_apis.apiauctions_page
     spent = 0
     for auction, day, limit in plan(start):
@@ -95,11 +100,18 @@ def fetch(token: str, out: Path, start: date, budget: int, get: Get | None = Non
                         return spent
                     if error.code != 429:
                         raise
-                    time.sleep(60)  # rate limited: wait, then ask again
+                    wait = int(error.headers.get("Retry-After") or 60)
+                    if wait > MAX_WAIT:  # e.g. the account's monthly spend cap: days
+                        print(f"stopped after {spent} requests: {_message(error)} "
+                              f"(retry in {wait // 3600} h)")
+                        return spent
+                    time.sleep(wait)  # rate limited: wait, then ask again
                     continue
                 spent += 1
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps(body))
+                if saved:
+                    saved(body.get("result") or [])
                 time.sleep(max(0.0, PAUSE - (time.monotonic() - started)))
             pages = (body.get("pagination") or {}).get("total_pages") or 0
             if page == 1:
@@ -108,6 +120,14 @@ def fetch(token: str, out: Path, start: date, budget: int, get: Get | None = Non
             if page >= min(pages, limit or pages):
                 break
             page += 1
+
+
+def _message(error: urllib.error.HTTPError) -> str:
+    """The API's own explanation of an error, e.g. "Monthly spend cap reached."."""
+    try:
+        return json.loads(error.read())["message"]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return str(error.reason)
 
 
 def pages(out: Path, auction: str = "*") -> Iterator[tuple[str, date, list[dict[str, Any]]]]:
@@ -261,17 +281,24 @@ def write(conn: Connection, rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def rows(cars: Iterable[Mapping[str, Any]], codes: Mapping[str, Mapping[str, str]],
+         counts: Counter) -> list[dict[str, Any]]:
+    """The `lots` rows of the US lots with a past sale; counts the others as skipped."""
+    cars = [car for car in cars if car.get("auction_name") in AUCTIONS]
+    found = [row for car in cars if (row := to_lot(car, codes))]
+    counts["skipped"] += len(cars) - len(found)
+    counts["sold"] += sum(row["final_price"] is not None for row in found)
+    return found
+
+
 def load(conn: Connection, out: Path, codes: Mapping[str, Mapping[str, str]]) -> Counter:
     """Writes every saved day, one transaction per day; returns the counts."""
     counts: Counter = Counter()
     for auction, day, cars in pages(out):
-        if auction not in AUCTIONS:
-            continue
-        rows = [row for car in cars if (row := to_lot(car, codes))]
-        counts["skipped"] += len(cars) - len(rows)  # no past sale yet
-        counts["sold"] += sum(row["final_price"] is not None for row in rows)
-        counts.update(write(conn, rows))
-        print(f"{auction} {day}: {len(rows)} lots", flush=True)
+        if auction in AUCTIONS:
+            found = rows(cars, codes, counts)
+            counts.update(write(conn, found))
+            print(f"{auction} {day}: {len(found)} lots", flush=True)
     return counts
 
 
@@ -286,22 +313,25 @@ def main(argv: list[str] | None = None) -> None:
     commands.add_parser("load", help="write the saved pages into lots")
     args = parser.parse_args(argv)
 
-    if args.command == "fetch":
-        token = get_settings().apiauctions_token
-        if not token:
-            raise SystemExit("APIAUCTIONS_TOKEN is not set")
-        print(f"{fetch(token, args.dir, args.start, args.max_requests)} requests")
-        return
+    token = get_settings().apiauctions_token
+    if args.command == "fetch" and not token:
+        raise SystemExit("APIAUCTIONS_TOKEN is not set")
     from .db import connect
 
     with connect() as conn:
-        if args.command == "calibrate":
+        codes = json.loads(CODES.read_text()) if CODES.exists() else {}
+        if args.command == "fetch":  # each page lands in lots as it arrives
+            counts: Counter = Counter()
+            spent = fetch(token, args.dir, args.start, args.max_requests,
+                          saved=lambda cars: counts.update(write(conn, rows(cars, codes,
+                                                                             counts))))
+            print(f"{spent} requests", dict(counts))
+        elif args.command == "calibrate":
             tables = calibrate(conn, (car for _, _, cars in pages(args.dir, "COPART")
                                       for car in cars))
             CODES.write_text(json.dumps(tables, indent=2, sort_keys=True) + "\n")
             print({column: len(table) for column, table in tables.items()}, "->", CODES)
         else:
-            codes = json.loads(CODES.read_text()) if CODES.exists() else {}
             print(dict(load(conn, args.dir, codes)))
 
 

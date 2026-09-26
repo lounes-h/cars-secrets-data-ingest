@@ -219,11 +219,14 @@ auction in `active_bidding` (epoch milliseconds).
 `python -m ingest.apiauctions_import` puts apiauctions' sales into `lots`, next to the exported
 ones, for the model to learn from. It is run by hand and spends requests ($0.01 each, 50 lots).
 
-1. `fetch` saves raw pages under `data/apiauctions/<AUCTION>/<day>/<page>.json`, never twice.
-   It first reads 9 pages a day of Copart's sales of 2026-09-18 to 09-24, which our own lots
-   also cover, then every US Copart and IAAI lot from `--start` (2026-08-25) back one day at a
-   time, until the credit runs out (402). A weekday is ~16–25k Copart lots (half of them not
-   sold, relisted), so ~900 requests with IAA; a weekend day a few hundred lots.
+1. `fetch` saves raw pages under `data/apiauctions/<AUCTION>/<day>/<page>.json`, never twice,
+   and writes each new page into `lots` at once, so the dashboard follows it. It first reads 9
+   pages a day of Copart's sales of 2026-09-18 to 09-24, which our own lots also cover, then
+   every US Copart and IAAI lot from `--start` (2026-08-25) back one day at a time, until the
+   credit runs out (402) or a 429 asks to wait more than 5 minutes: the account's monthly spend
+   cap answers `429 "Monthly spend cap reached."` with a `Retry-After` of days. One request a
+   second at most (the API's latency makes it ~2.3 s). A weekday is ~16–25k Copart lots (half of
+   them not sold, relisted), so ~900 requests with IAA; a weekend day a few hundred lots.
 2. `calibrate` learns how apiauctions words three Copart columns, from the lots both have:
    `vehicle_type` (`AUTOMOBILE` → `V`), `title_type` (a state's title description →
    `SC`, `ST`, `CT`, …) and `runs_drives` (`RUNS AND DRIVES` → `Run & Drive Verified`). A value
@@ -232,7 +235,8 @@ ones, for the model to learn from. It is run by hand and spends requests ($0.01 
    for the states the sample missed, when every state using it agrees: 95 % of imported Copart
    lots get a title, against 77 % from the exact wording alone. A value without a translation
    is stored as NULL. The other columns share Copart's wording.
-3. `load` (offline, rerunnable) writes each day in one transaction under the loader's lock. A
+3. `load` (offline, rerunnable: after `calibrate`, say) writes every saved day again, each in
+   one transaction under the loader's lock, as `fetch` writes each page. A
    lot no export brought is inserted as finished: removed at its latest sale, first seen when
    apiauctions listed it, `attributes` its flattened raw record, no file ids (`last_file_id IS
    NULL` tells them apart); a rerun refreshes those rows (new `sync_version`). A lot an export
