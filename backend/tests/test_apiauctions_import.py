@@ -197,18 +197,19 @@ def test_a_day_without_lots_moves_on(tmp_path, one_calibration_page):
 
 
 def export_lot(conn, lot, **values):
-    """A Copart lot an export brought."""
+    """A Copart lot an export brought: listed 10 days before its auction, seen until it began."""
     file_id = conn.execute(
         """INSERT INTO ingest_files (source, filename, sha256, status)
            VALUES ('copart', 'x.csv', %s, 'succeeded') RETURNING id""", (lot,)).fetchone()["id"]
     row = {"make": "VOLVO", "vehicle_type": "V", "title_type": "SC",
-           "runs_drives": "Run & Drive Verified", **values}
+           "runs_drives": "Run & Drive Verified", "sale_at": NIGHT_SALE,
+           "first_seen_at": NIGHT_SALE - timedelta(days=10), "last_seen_at": NIGHT_SALE,
+           "last_changed_at": NIGHT_SALE - timedelta(days=10), **values}
     conn.execute(
         f"""INSERT INTO lots (source, lot_number, {', '.join(row)}, attributes, row_hash,
-                              first_seen_at, last_seen_at, last_changed_at, first_file_id,
-                              last_file_id)
-            VALUES ('copart', %s, {', '.join(['%s'] * len(row))}, '{{}}', '\\x00', now(), now(),
-                    now(), %s, %s)""", (lot, *row.values(), file_id, file_id))
+                              first_file_id, last_file_id)
+            VALUES ('copart', %s, {', '.join(['%s'] * len(row))}, '{{}}', '\\x00', %s, %s)""",
+        (lot, *row.values(), file_id, file_id))
 
 
 def test_calibrate_learns_the_codes_our_export_gives_the_same_lots(conn):
@@ -268,6 +269,22 @@ def test_load_writes_finished_lots_and_prices_ours_without_touching_them(
     assert new["attributes"]["sales_history.0.purchase_price"] == "5000"
     assert rows["3"]["final_price"] is None
     assert rows["4"]["source"] == "iaai"
+
+
+def test_an_export_lot_only_gets_the_price_of_its_own_sale(conn, tmp_path):
+    later = NIGHT_SALE + timedelta(days=6)
+    export_lot(conn, "1")  # sold at its auction
+    export_lot(conn, "2", sale_at=later)  # bought before its auction, once we last saw it
+    # Relisted after that sale: we first saw it days later, and it had a price from before.
+    export_lot(conn, "3", first_seen_at=NIGHT_SALE + timedelta(days=2), last_seen_at=later,
+               sale_at=later, final_price=999)
+    # Said sold, yet still listed two days later for a later auction: not its sale.
+    export_lot(conn, "4", last_seen_at=NIGHT_SALE + timedelta(days=2), sale_at=later)
+    save(tmp_path, "COPART", "2026-08-19", [car(n) for n in "1234"])
+
+    assert load(conn, tmp_path, CODES)["priced"] == 3
+    assert {n: row["final_price"] for n, row in lots(conn).items()} == {
+        "1": 5000, "2": 5000, "3": None, "4": None}
 
 
 def test_a_reload_refreshes_only_lots_no_export_brought(conn, tmp_path):

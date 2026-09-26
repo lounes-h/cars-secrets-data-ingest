@@ -19,7 +19,8 @@ a value it could not learn is stored as NULL (the raw value stays in `attributes
 `load` writes every saved page again (after `calibrate`, say). A lot is mapped onto the
 canonical columns and written as a finished lot: removed at its
 latest sale, without file ids (no export brought it), `final_price` set only if it sold. A lot an
-export brought keeps its columns and only gets `final_price`.
+export brought keeps its columns and only gets `final_price`, from its own sale: its auction, or
+a Buy It Now sale before it; never an earlier listing's sale of the same lot number.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from zoneinfo import ZoneInfo
 from psycopg import Connection
 
 from . import auction_apis
+from .api_check import AUCTION, HOUR
 from .auction_apis import epoch
 from .config import get_settings
 from .db import notify
@@ -261,10 +263,18 @@ def write(conn: Connection, rows: list[dict[str, Any]]) -> dict[str, int]:
                 SELECT source, lot_number, {_TYPED}, final_price, attributes, row_hash,
                        first_seen_at, sold_at, sold_at, sold_at FROM import_stage
                 ON CONFLICT (source, lot_number) DO NOTHING""").rowcount
+        # apiauctions keeps a lot's latest sale only: it prices the listing we have if it is
+        # this listing's auction, or a sale before it once we last saw the lot (Buy It Now).
+        # An earlier listing's sale (the lot came back unsold or unpaid) is not its price.
+        own_sale = """(s.sold_at BETWEEN l.sale_at - %(hour)s AND l.sale_at + %(auction)s
+                       OR s.sold_at BETWEEN l.last_seen_at - %(hour)s AND l.sale_at)"""
         priced = conn.execute(
-            """UPDATE lots l SET final_price = s.final_price FROM import_stage s
-               WHERE l.source = s.source AND l.lot_number = s.lot_number
-                 AND l.final_price IS DISTINCT FROM s.final_price""").rowcount
+            f"""UPDATE lots l SET final_price = CASE WHEN {own_sale} THEN s.final_price END
+                FROM import_stage s
+                WHERE l.source = s.source AND l.lot_number = s.lot_number
+                  AND l.final_price IS DISTINCT FROM
+                      (CASE WHEN {own_sale} THEN s.final_price END)""",
+            {"hour": HOUR, "auction": AUCTION}).rowcount
         # A lot no export brought: its columns follow the latest page and translations.
         refreshed = conn.execute(
             f"""UPDATE lots l SET ({_TYPED}, attributes, row_hash, last_seen_at,

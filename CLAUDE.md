@@ -287,13 +287,15 @@ A code change is not considered complete until the relevant unit tests have been
 - Final price model built and served (`predicted_final_price`), trained on generated sold
   prices only: MAE $493 against a $2,032 baseline on the synthetic target.
 - Real sale prices: apiauctions.io was chosen over apibara.tech (`api_check.py`: apibara priced
-  5 of 50 sold Copart lots below a binding bid, apiauctions none). `apiauctions_import.py` has
-  loaded 18.5k Copart lots sold on 2026-08-25 (430 of its 498 pages) and final prices for 21k
-  lots, 2,317 of them our own (09-18 to 09-24): none below our last pre-auction bid. It stopped
-  at the account's monthly spend cap (~$5, ~500 requests; `429 "Monthly spend cap reached."`);
-  the rest of the $25 credit needs the cap raised in apiauctions' dashboard, then `fetch`
-  resumes where it stopped. No IAA lots yet. The model still trains on generated prices.
-- Not done yet: external alert channels, a second provider, real sale prices.
+  5 of 50 sold Copart lots below a binding bid, apiauctions none). `apiauctions_import.py` spent
+  the $25 credit (2,516 requests) on 2026-09-25: every US Copart and IAAI lot of Aug 21–25,
+  about 2/3 of Copart's Aug 20, and a calibration sample of Copart's Sept 18–24. `lots` now has
+  103.5k imported lots (64.7k Copart, 92.7 % sold; 38.8k IAA, 75.5 % sold) and final prices on
+  94.8k lots, 5,552 of them our own export lots: none below our last pre-auction bid. The
+  account has a monthly spend cap (raised from $5 to $100). The model still trains on generated
+  prices; training on `final_price` is next.
+- Not done yet: external alert channels, a second provider (IAA sales are stored, not its
+  live lots), training the price model on real sale prices.
 
 ## Branching
 

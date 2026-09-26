@@ -240,7 +240,11 @@ ones, for the model to learn from. It is run by hand and spends requests ($0.01 
    lot no export brought is inserted as finished: removed at its latest sale, first seen when
    apiauctions listed it, `attributes` its flattened raw record, no file ids (`last_file_id IS
    NULL` tells them apart); a rerun refreshes those rows (new `sync_version`). A lot an export
-   brought keeps every column and only gets `final_price`. Lots without a past sale are skipped.
+   brought keeps every column and only gets `final_price`, and only from its own sale: within
+   its auction (start − 1 h to start + 4 h) or a Buy It Now sale after we last saw it listed.
+   apiauctions keeps a lot's latest sale only, and a lot number can come back for a new listing
+   after a sale that fell through; that earlier sale's price is never the new listing's (it was
+   below our pre-auction bid on 67 of 413 such lots). Lots without a past sale are skipped.
    `sale_date` is the sale's US Eastern date, like Copart's. Each day's commit sends a
    `lots_imported` event, so the dashboard's lot totals and lists refresh.
 
