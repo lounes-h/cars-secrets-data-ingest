@@ -199,7 +199,7 @@ price/retail is the same in both auctions (22.4 % and 22.5 %).
 
 On 2026-09-25, trained on 89k sales (59.8k Copart, 29.3k IAA; 3 s, 310 trees), on the test set
 of 5,516 Sept Copart lots: MAE $1,601, median error $752, half the lots within 31 % of their
-price, R² 0.73; the baseline's MAE $2,204, the synthetic model's (generated prices, still live)
+price, R² 0.73; the baseline's MAE $2,204, the synthetic model's it replaced on 2026-09-26 (generated prices)
 $2,099 and R² 0.47. The error is largest in relative terms on lots under $500 (median 96 %) and
 where the retail value is unknown (37 % of the test lots: MAE $1,900 against $1,425). Trained on
 Copart alone: MAE $1,577, R² 0.76; IAA sales do not change Copart prices much either way.

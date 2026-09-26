@@ -288,8 +288,6 @@ A code change is not considered complete until the relevant unit tests have been
   login that keeps failing).
   Copart's Image and Data License Agreement governs the data and photos; the owner is
   checking that automated downloads are allowed.
-- Final price model served (`predicted_final_price`); the one live is still trained on
-  generated prices (see below for the real-price one).
 - Real sale prices: apiauctions.io was chosen over apibara.tech (`api_check.py`: apibara priced
   5 of 50 sold Copart lots below a binding bid, apiauctions none). `apiauctions_import.py` spent
   the $25 credit (2,516 requests) on 2026-09-25: every US Copart and IAAI lot of Aug 21–25,
@@ -297,13 +295,13 @@ A code change is not considered complete until the relevant unit tests have been
   103.5k imported lots (64.7k Copart, 92.7 % sold; 38.8k IAA, 75.5 % sold) and final prices on
   94.8k lots, 5,552 of them our own export lots: none below our last pre-auction bid. The
   account has a monthly spend cap (raised from $5 to $100).
-- Price model retrained on real prices (89k Copart + IAA sales, 2026-09-25): on our 5,516 Sept
-  Copart lots (test set) MAE $1,601, median error $752, half the lots within 31 % of their
-  price, R² 0.73, against $2,099 / 0.47 for the synthetic model still live. IAA sales neither
-  help nor hurt Copart prices (Copart only: MAE $1,577). The new model
-  (`data/models/final_price-real.ubj`) goes live only when the owner says so, with this code.
+- Price model trained on real prices (89k Copart + IAA sales), live since 2026-09-26 and
+  serving all active lots: on our 5,516 Sept Copart lots (test set) MAE $1,601, median error
+  $752, half the lots within 31 % of their price, R² 0.73, against $2,099 / 0.47 for the
+  synthetic model it replaced (kept as `data/models/final_price-synthetic.ubj`). IAA sales
+  neither help nor hurt Copart prices (Copart only: MAE $1,577).
 - Not done yet: external alert channels, a second provider (IAA sales are stored, not its
-  live lots), putting the real-price model live.
+  live lots).
 
 ## Branching
 
