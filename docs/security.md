@@ -51,6 +51,18 @@ hand) calls `apiauctions.io` with the same token and saves its pages under `data
 (git-ignored); the lots it loads keep only the raw record's text in `attributes`, rendered as
 text like any source value. Its pages include buyer ids and states, never names.
 
+## AI damage analysis
+
+`ANTHROPIC_API_KEY` lives in `.env` only and reaches the worker, the only process that calls
+the model; the API only queues requests. The worker downloads a lot's photos from the URLs its
+provider's `fetch_images` returns (allow-listed hosts only, HTTPS only, at most 15 MB each) and
+sends shrunk copies with the lot's metadata to Anthropic. The metadata leaves out the VIN, the
+seller, addresses and prices other than the estimated retail value. The model's answer is data:
+it is validated against the schema before it is stored, and the page renders its text as text
+and its boxes as positions over the auction's own photos. Requesting an analysis needs the
+dashboard session like every other route; each request records the user who made it. Every
+analysis spends API credit, so only a person triggers one.
+
 ## Copart session (downloader)
 
 The downloader keeps Copart's session cookie in a dedicated Chrome profile at

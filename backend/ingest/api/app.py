@@ -1,4 +1,5 @@
-"""Dashboard API: pipeline status, runs, alerts, schema registry, lot explorer, live events."""
+"""Dashboard API: pipeline status, runs, alerts, schema registry, lot explorer with AI damage
+analyses, live events."""
 
 import asyncio
 import contextlib
@@ -19,8 +20,9 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from .. import ai, vehicle_analysis
 from ..config import Settings, get_settings
-from ..db import EVENTS_CHANNEL
+from ..db import EVENTS_CHANNEL, notify
 from ..log_config import configure_logging
 from ..monitor import downloader_status, run_checks
 from ..providers import PROVIDERS
@@ -625,6 +627,65 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
             result = asdict(provider.fetch_images(lot))
             image_cache.put(key, result)
         return result
+
+    # --- AI damage analysis (run by the worker, vehicle_analysis.py) ----------------------------
+    ANALYSIS_COLUMNS = """id, source, lot_number, status, language, requested_by, provider,
+        model, prompt_version, schema_version, images, image_count, result, usage, request,
+        error, created_at, started_at, completed_at, updated_at"""
+
+    def lot_exists(conn: psycopg.Connection, source: str, lot_number: str) -> None:
+        if conn.execute("SELECT 1 FROM lots WHERE source = %s AND lot_number = %s",
+                        (source, lot_number)).fetchone() is None:
+            raise HTTPException(404, "lot not found")
+
+    @api.get("/lots/{source}/{lot_number}/analyses")
+    def lot_analyses(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
+        """The latest completed analysis, and the latest request whatever its status (in
+        progress, or failed after it). Older analyses stay in the database."""
+        lot_exists(conn, source, lot_number)
+        key = {"source": source, "lot_number": lot_number}
+        latest = conn.execute(
+            f"""SELECT {ANALYSIS_COLUMNS} FROM vehicle_analyses
+                WHERE source = %(source)s AND lot_number = %(lot_number)s
+                  AND status = 'completed' ORDER BY id DESC LIMIT 1""", key).fetchone()
+        current = conn.execute(
+            f"""SELECT {ANALYSIS_COLUMNS} FROM vehicle_analyses
+                WHERE source = %(source)s AND lot_number = %(lot_number)s
+                ORDER BY id DESC LIMIT 1""", key).fetchone()
+        return {"latest": latest, "current": current}
+
+    @api.get("/analysis-models")
+    def analysis_models() -> dict[str, Any]:
+        """The models an analysis may use, with their prices, and the default (AI_MODEL)."""
+        return {"default": settings.ai_model,
+                "models": [{"id": k, **asdict(m)} for k, m in ai.MODELS.items()]}
+
+    class AnalysisRequest(BaseModel):
+        language: str | None = None  # default: AI_LANGUAGE
+        model: str | None = None  # default: AI_MODEL; one of ai.MODELS
+
+    @api.post("/lots/{source}/{lot_number}/analyses", status_code=202)
+    def request_analysis(source: str, lot_number: str, conn: Conn, user: User,
+                         body: AnalysisRequest | None = None) -> dict[str, Any]:
+        """Queue a new analysis of the lot; the worker starts it within seconds."""
+        language = (body.language if body else None) or settings.ai_language
+        if language not in vehicle_analysis.LANGUAGES:
+            raise HTTPException(422, f"unsupported language {language!r}")
+        model = (body.model if body else None) or settings.ai_model
+        if model not in ai.MODELS:  # a client never picks an unlisted (unpriced) model
+            raise HTTPException(422, f"unsupported model {model!r}")
+        lot_exists(conn, source, lot_number)
+        try:
+            row = conn.execute(
+                f"""INSERT INTO vehicle_analyses (source, lot_number, language, model,
+                                                  requested_by)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING {ANALYSIS_COLUMNS}""",
+                (source, lot_number, language, model, user)).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(409, "an analysis of this lot is already in progress") from None
+        notify(conn, "analysis", id=row["id"], source=source, lot_number=lot_number,
+               status=row["status"])
+        return row
 
     # --- live events -----------------------------------------------------------------------------
     @api.get("/events")

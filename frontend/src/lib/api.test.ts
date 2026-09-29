@@ -54,6 +54,9 @@ describe("endpoints", () => {
     await api.lot("copart", "a/b");
     await api.lotImages("copart", "1");
     await api.lotFilters();
+    await api.lotAnalyses("copart", "1");
+    await api.analysisModels();
+    await api.requestAnalysis("copart", "1", "claude-opus-5-5");
     await api.addFavorite("copart", "1");
     await api.removeFavorite("copart", "1");
     expect(calls).toEqual([
@@ -61,6 +64,7 @@ describe("endpoints", () => {
       "GET /api/runs/3", "POST /api/runs/3/retry", "GET /api/runs/3/rows?kind=new", "GET /api/alerts",
       "POST /api/alerts/4/ack", "POST /api/alerts/4/resolve", "GET /api/schema", "GET /api/lots?q=vin",
       "GET /api/lots/copart/a%2Fb", "GET /api/lots/copart/1/images", "GET /api/lot-filters",
+      "GET /api/lots/copart/1/analyses", "GET /api/analysis-models", "POST /api/lots/copart/1/analyses",
       "PUT /api/lots/copart/1/favorite", "DELETE /api/lots/copart/1/favorite",
     ]);
   });

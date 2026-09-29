@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     apibara_api_key: str = Field(default="", repr=False)
     apiauctions_token: str = Field(default="", repr=False)
 
+    # AI condition and damage analysis of a lot (vehicle_analysis.py), run by the worker on
+    # request. The provider is a key of `ai.CLIENTS`; the prompt and schema versions must be
+    # ones vehicle_analysis.py knows.
+    ai_provider: str = "anthropic"
+    ai_model: str = "claude-opus-5-5"  # preselected on the lot page; one of ai.MODELS
+    ai_language: str = "en"  # default output language of a requested analysis
+    ai_prompt_version: str = "vehicle-damage-v1"
+    ai_schema_version: str = "1.0"
+    ai_max_images: int = 5  # photos sent per analysis, at most (fewer when fewer are useful)
+    ai_image_max_px: int = 1024  # longest side of a photo as sent; smaller ones are kept as is
+    analysis_poll_seconds: float = 3.0  # how soon the worker notices a requested analysis
+    anthropic_api_key: str = Field(default="", repr=False)
+
     # Comma-separated providers expected to deliver files; each is checked for staleness.
     enabled_providers: str = "copart"
 

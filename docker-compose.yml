@@ -19,6 +19,14 @@ x-backend: &backend
     # Auction data APIs checked by `python -m ingest.api_check` (keys live in .env only).
     APIBARA_API_KEY: ${APIBARA_API_KEY:-}
     APIAUCTIONS_TOKEN: ${APIAUCTIONS_TOKEN:-}
+    # AI damage analysis of a lot, run by the worker when asked from the lot page.
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+    AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
+    AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-vehicle-damage-v1}
+    AI_SCHEMA_VERSION: ${AI_SCHEMA_VERSION:-1.0}
+    AI_MAX_IMAGES: ${AI_MAX_IMAGES:-5}
+    AI_IMAGE_MAX_PX: ${AI_IMAGE_MAX_PX:-1024}
     INBOX_DIR: /data/inbox
     ARCHIVE_DIR: /data/archive
     FAILED_DIR: /data/failed
@@ -91,6 +99,8 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?run ./start.sh to create .env}
       SESSION_SECRET: ${SESSION_SECRET:?run ./start.sh to create .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AI_LANGUAGE: ${AI_LANGUAGE:-en}  # language of a requested analysis unless it names one
+      AI_MODEL: ${AI_MODEL:-claude-opus-5-5}  # the model preselected for a new analysis
     volumes:
       - ./data:/data  # "retry" moves a failed file back into the inbox
     depends_on:
