@@ -142,6 +142,16 @@ export interface Lot {
   removed_at: string | null;
 }
 
+/** Values the Lots page's filters offer: those of the active lots. */
+export interface LotFilterOptions {
+  makes: string[];
+  damages: string[];
+  states: string[];
+  yards: string[];
+  keys: string[];
+  runs: string[];
+}
+
 export type RunLot = Pick<
   Lot,
   "source" | "lot_number" | "year" | "make" | "model_group" | "trim" | "vin" | "sale_status"
@@ -379,7 +389,8 @@ export const api = {
   ackAlert: (id: number) => request<Alert>("POST", `/api/alerts/${id}/ack`),
   resolveAlert: (id: number) => request<Alert>("POST", `/api/alerts/${id}/resolve`),
   schema: (params?: Params) => request<{ items: Column[] }>("GET", withParams("/api/schema", params)),
-  lots: (params?: Params) => request<{ items: Lot[] }>("GET", withParams("/api/lots", params)),
+  lots: (params?: Params) => request<{ items: Lot[]; total: number }>("GET", withParams("/api/lots", params)),
+  lotFilters: () => request<LotFilterOptions>("GET", "/api/lot-filters"),
   lot: (source: string, lotNumber: string) =>
     request<LotDetail>("GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}`),
   lotImages: (source: string, lotNumber: string) =>
