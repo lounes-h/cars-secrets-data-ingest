@@ -275,7 +275,9 @@ A code change is not considered complete until the relevant unit tests have been
   yard-scoped removals deferred until the auction is over, alerts (dashboard only, no
   email/Slack by decision), dashboard with login, live updates, run retry, lot explorer with
   photos. The Lots page's All, Active, and Removed filters show inventory totals, independent
-  of search and pagination, refreshed by live ingestion events. One provider: Copart.
+  of search and pagination, refreshed by live ingestion events. Each dashboard user can mark
+  lots as favorites (☆ in the list and on the lot page, `lot_favorites`) and list only those
+  (★ Favorites). One provider: Copart.
 - Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
 - Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires

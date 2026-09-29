@@ -49,6 +49,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
 | `alerts` | Alerts; at most one unresolved row per `fingerprint` |
 | `worker_heartbeat` | Liveness of the worker |
+| `lot_favorites` | Lots each dashboard user marked as favorite (`username` = the session's user) |
 
 ### Why the schema survives CSV changes
 

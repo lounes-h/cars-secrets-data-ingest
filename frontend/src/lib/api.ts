@@ -140,6 +140,8 @@ export interface Lot {
   last_seen_at: string;
   last_changed_at: string;
   removed_at: string | null;
+  /** Marked as favorite by the signed-in user. */
+  favorite: boolean;
 }
 
 export type RunLot = Pick<
@@ -247,6 +249,10 @@ export const api = {
   lots: (params?: Params) => request<{ items: Lot[] }>("GET", withParams("/api/lots", params)),
   lot: (source: string, lotNumber: string) =>
     request<LotDetail>("GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}`),
+  addFavorite: (source: string, lotNumber: string) =>
+    request<void>("PUT", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/favorite`),
+  removeFavorite: (source: string, lotNumber: string) =>
+    request<void>("DELETE", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/favorite`),
   lotImages: (source: string, lotNumber: string) =>
     request<{ images: LotImage[]; complete: boolean }>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/images`),

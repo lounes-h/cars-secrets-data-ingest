@@ -18,6 +18,8 @@
 
 Only `/api/health` and `/api/auth/login` are public. Every other route, including the SSE
 stream, is on a router that requires the session. New routes must be added to that router.
+Favorites belong to the signed-in user: the favorite routes and the `favorite` flag of a lot
+read the username from the session, never from the request.
 
 ## Data handling
 

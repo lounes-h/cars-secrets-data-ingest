@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { FavoriteButton } from "../components/Favorite";
 import { Gallery } from "../components/Gallery";
 import { Badge, QueryState, Segmented } from "../components/ui";
 import { api } from "../lib/api";
@@ -25,10 +26,11 @@ export function LotsPage() {
   const [input, setInput] = useState("");
   const [state, setState] = useState<State>("all");
   const [offset, setOffset] = useState(0);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const q = useDebounced(input.trim());
   const lots = useQuery({
-    queryKey: ["lots", q, state, offset],
-    queryFn: () => api.lots({ q, state, limit: LIMIT, offset }),
+    queryKey: ["lots", q, state, offset, favoritesOnly],
+    queryFn: () => api.lots({ q, state, limit: LIMIT, offset, ...(favoritesOnly && { favorites: "true" }) }),
   });
 
   return (
@@ -44,6 +46,9 @@ export function LotsPage() {
             { value: "active", label: `Active (${int(counts?.active)})` },
             { value: "removed", label: `Removed (${int(counts?.removed)})` },
           ]} />
+        <button aria-pressed={favoritesOnly} onClick={() => { setFavoritesOnly(!favoritesOnly); setOffset(0); }}>
+          ★ Favorites
+        </button>
       </div>
       <QueryState isLoading={lots.isLoading} error={lots.error} />
       {lots.data && (
@@ -52,6 +57,7 @@ export function LotsPage() {
             <table>
               <thead>
                 <tr>
+                  <th><span className="visually-hidden">Favorite</span></th>
                   <th><span className="visually-hidden">Photo</span></th><th>Lot</th><th>Vehicle</th><th>VIN</th><th>Damage</th><th className="num">Odometer</th>
                   <th className="num">High bid</th><th>Yard</th><th>Sale</th><th>Last change</th><th>State</th>
                 </tr>
@@ -60,6 +66,7 @@ export function LotsPage() {
                 {lots.data.items.map((l) => (
                   <tr key={`${l.source}/${l.lot_number}`} className="clickable"
                     onClick={() => navigate(`/lots/${l.source}/${l.lot_number}`)}>
+                    <td><FavoriteButton source={l.source} lotNumber={l.lot_number} favorite={l.favorite} /></td>
                     <td>{l.thumbnail_url
                       ? <img className="lot-thumb" src={l.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
                       : <div className="lot-thumb" />}</td>
@@ -78,7 +85,9 @@ export function LotsPage() {
                   </tr>
                 ))}
                 {lots.data.items.length === 0 && (
-                  <tr><td colSpan={11} className="empty">No lots match.</td></tr>
+                  <tr><td colSpan={12} className="empty">
+                    {favoritesOnly ? "No favorites match. Mark lots with ☆ to find them here." : "No lots match."}
+                  </td></tr>
                 )}
               </tbody>
             </table>
@@ -117,6 +126,7 @@ export function LotDetailPage() {
           <span className="muted">· lot {lot.lot_number}</span>
         </h1>
         <div className="lot-actions">
+          <FavoriteButton source={lot.source} lotNumber={lot.lot_number} favorite={lot.favorite} labelled />
           {lot.removed_at ? <Badge tone="neutral">removed {dateTime(lot.removed_at)}</Badge> : <Badge tone="good">active</Badge>}
           {lot.listing_url && (
             <a className="button-link" href={lot.listing_url} target="_blank" rel="noopener noreferrer">

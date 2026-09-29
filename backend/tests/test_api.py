@@ -495,3 +495,33 @@ def test_event_stream_relays_events_and_keeps_alive_until_the_browser_leaves(set
     assert chunks[:3] == [
         "retry: 3000\n\n", 'data: {"type":"run_finished"}\n\n', ": keep-alive\n\n"]
     assert brokers[0].subscribers == set()
+
+
+def test_favorites_are_marked_listed_and_removed_per_user(authed, conn, settings, make_export):
+    header, rows = read_sample()
+    process_file(conn, make_export(rows[:5]), COPART, settings)
+    first, second = (r[header.index("Lot number")] for r in rows[:2])
+    # another dashboard user's favorite is not ours
+    conn.execute("INSERT INTO lot_favorites VALUES ('someone-else', 'copart', %s)", (second,))
+
+    for _ in range(2):  # marking twice changes nothing
+        assert authed.put(f"/api/lots/copart/{first}/favorite").status_code == 204
+    listed = {i["lot_number"]: i["favorite"]
+              for i in authed.get("/api/lots").json()["items"]}
+    assert listed[first] is True and listed[second] is False and sum(listed.values()) == 1
+    favorites = authed.get("/api/lots", params={"favorites": "true"}).json()["items"]
+    assert [i["lot_number"] for i in favorites] == [first]
+    assert authed.get(f"/api/lots/copart/{first}").json()["lot"]["favorite"] is True
+    assert authed.get(f"/api/lots/copart/{second}").json()["lot"]["favorite"] is False
+
+    assert authed.delete(f"/api/lots/copart/{first}/favorite").status_code == 204
+    assert authed.delete(f"/api/lots/copart/{first}/favorite").status_code == 204
+    assert authed.get("/api/lots", params={"favorites": "true"}).json()["items"] == []
+    assert conn.execute("SELECT username, lot_number FROM lot_favorites").fetchall() == [
+        {"username": "someone-else", "lot_number": second}]
+    assert authed.put("/api/lots/copart/0/favorite").json()["detail"] == "lot not found"
+
+
+def test_favorites_require_login(client):
+    assert client.put("/api/lots/copart/1/favorite").status_code == 401
+    assert client.delete("/api/lots/copart/1/favorite").status_code == 401
