@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
 import { api, type Lot, type LotDetail, type Overview } from "../lib/api";
+import { activeCount } from "../components/LotFilters";
 import { LotDetailPage, LotsPage } from "./Lots";
 
 afterEach(() => vi.restoreAllMocks());
@@ -16,7 +17,7 @@ describe("lot totals", () => {
   };
 
   function show() {
-    vi.spyOn(api, "lots").mockResolvedValue({ items: [] });
+    vi.spyOn(api, "lots").mockResolvedValue({ items: [], total: 0 });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
@@ -96,9 +97,9 @@ const bare: Lot = {
 };
 
 describe("lot list", () => {
-  function list(items: Lot[]) {
+  function list(items: Lot[], total = items.length) {
     vi.spyOn(api, "overview").mockRejectedValue(new Error("Unavailable"));
-    const lots = vi.spyOn(api, "lots").mockResolvedValue({ items });
+    const lots = vi.spyOn(api, "lots").mockResolvedValue({ items, total });
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter initialEntries={["/lots"]}>
@@ -125,12 +126,73 @@ describe("lot list", () => {
     expect(await screen.findByText("detail page")).toBeInTheDocument();
   });
 
-  it("pages forward while a page is full, and back", async () => {
-    const lots = list(Array.from({ length: 50 }, (_, i) => ({ ...lot, lot_number: String(i) })));
+  it("pages through every match, and back", async () => {
+    const lots = list(Array.from({ length: 50 }, (_, i) => ({ ...lot, lot_number: String(i) })), 120);
+    expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument();
+    expect(screen.getByText("120 lots")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Next" }));
     await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 50 }));
     fireEvent.click(await screen.findByRole("button", { name: "Previous" }));
     await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 0 }));
+  });
+});
+
+describe("lot filters", () => {
+  const options = {
+    makes: ["ACURA", "HONDA"], damages: ["FRONT END", "REAR END"], states: ["CA", "TX"],
+    yards: ["CA - VALLEJO"], keys: ["NO", "YES"], runs: ["Run & Drive", "Stationary"],
+  };
+
+  function page() {
+    vi.spyOn(api, "overview").mockRejectedValue(new Error("Unavailable"));
+    const lots = vi.spyOn(api, "lots").mockResolvedValue({ items: [lot], total: 1 });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter><LotsPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    return lots;
+  }
+
+  it("narrows the list with the chosen filters, counts them, and clears them", async () => {
+    vi.spyOn(api, "lotFilters").mockResolvedValue(options);
+    const lots = page();
+    expect(await screen.findByText("1 lot")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    const panel = screen.getByRole("group", { name: "Lot filters" });
+    expect(await within(panel).findByRole("option", { name: "FRONT END" })).toBeInTheDocument();
+    expect(panel.querySelector("#filter-makes option[value='HONDA']")).not.toBeNull();
+
+    fireEvent.change(within(panel).getByLabelText("Make"), { target: { value: "HONDA" } });
+    fireEvent.change(within(panel).getByLabelText("Primary damage"), { target: { value: "FRONT END" } });
+    fireEvent.change(within(panel).getByLabelText("Year from"), { target: { value: "2018" } });
+    fireEvent.change(within(panel).getByLabelText("Sale to"), { target: { value: "2026-10-01" } });
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({
+      q: "", state: "all", limit: 50, offset: 0,
+      make: "HONDA", damage: "FRONT END", year_min: "2018", sale_to: "2026-10-01",
+    }));
+    expect(screen.getByRole("button", { name: "Filters (4)" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 0 }));
+    expect(screen.getByRole("button", { name: "Filters" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    expect(screen.queryByRole("group", { name: "Lot filters" })).not.toBeInTheDocument();
+  });
+
+  it("still filters by typing when the filter values cannot be loaded", async () => {
+    vi.spyOn(api, "lotFilters").mockRejectedValue(new Error("timeout"));
+    const lots = page();
+    fireEvent.click(await screen.findByRole("button", { name: "Filters" }));
+    expect(await screen.findByText("Filter values unavailable: timeout")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Max odometer"), { target: { value: "90000" } });
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith(
+      expect.objectContaining({ odometer_max: "90000" })));
+  });
+
+  it("counts only filters that hold something", () => {
+    expect(activeCount({ make: " ", model: "", yard: "CA - VALLEJO" })).toBe(1);
   });
 });
 

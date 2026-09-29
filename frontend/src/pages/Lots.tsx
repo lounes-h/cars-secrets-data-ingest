@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Gallery } from "../components/Gallery";
-import { Badge, QueryState, Segmented } from "../components/ui";
+import { activeCount, LotFilters, type Filters } from "../components/LotFilters";
+import { Badge, Pager, QueryState, Segmented } from "../components/ui";
 import { api } from "../lib/api";
 import { dateTime, int, money } from "../lib/format";
 
@@ -25,10 +26,14 @@ export function LotsPage() {
   const [input, setInput] = useState("");
   const [state, setState] = useState<State>("all");
   const [offset, setOffset] = useState(0);
+  const [filters, setFilters] = useState<Filters>({});
+  const [showFilters, setShowFilters] = useState(false);
   const q = useDebounced(input.trim());
+  const applied = useDebounced(filters);
+  const active = activeCount(filters);
   const lots = useQuery({
-    queryKey: ["lots", q, state, offset],
-    queryFn: () => api.lots({ q, state, limit: LIMIT, offset }),
+    queryKey: ["lots", q, state, offset, applied],
+    queryFn: () => api.lots({ q, state, limit: LIMIT, offset, ...applied }),
   });
 
   return (
@@ -44,7 +49,15 @@ export function LotsPage() {
             { value: "active", label: `Active (${int(counts?.active)})` },
             { value: "removed", label: `Removed (${int(counts?.removed)})` },
           ]} />
+        <button aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
+          Filters{active ? ` (${active})` : ""}
+        </button>
+        {active > 0 && (
+          <button className="small" onClick={() => { setFilters({}); setOffset(0); }}>Clear filters</button>
+        )}
+        {lots.data && <span className="muted small match-count">{int(lots.data.total)} {lots.data.total === 1 ? "lot" : "lots"}</span>}
       </div>
+      {showFilters && <LotFilters value={filters} onChange={(f) => { setFilters(f); setOffset(0); }} />}
       <QueryState isLoading={lots.isLoading} error={lots.error} />
       {lots.data && (
         <>
@@ -83,11 +96,7 @@ export function LotsPage() {
               </tbody>
             </table>
           </div>
-          <div className="pager">
-            <button className="small" disabled={offset === 0} onClick={() => setOffset(offset - LIMIT)}>Previous</button>
-            <button className="small" disabled={lots.data.items.length < LIMIT}
-              onClick={() => setOffset(offset + LIMIT)}>Next</button>
-          </div>
+          <Pager offset={offset} limit={LIMIT} total={lots.data.total} onChange={setOffset} />
         </>
       )}
     </div>

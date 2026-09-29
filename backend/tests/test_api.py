@@ -495,3 +495,77 @@ def test_event_stream_relays_events_and_keeps_alive_until_the_browser_leaves(set
     assert chunks[:3] == [
         "retry: 3000\n\n", 'data: {"type":"run_finished"}\n\n', ": keep-alive\n\n"]
     assert brokers[0].subscribers == set()
+
+
+def test_lot_filters_narrow_the_list_and_count_the_matches(authed, conn, settings, make_export):
+    process_file(conn, make_export(), COPART, settings)
+    lot = conn.execute("""SELECT make, model_group, year, damage_primary, location_state,
+                                 yard_name, sale_date, has_keys, runs_drives, odometer
+                          FROM lots WHERE odometer > 0 ORDER BY lot_number LIMIT 1""").fetchone()
+
+    def matching(**params):
+        body = authed.get("/api/lots", params={"limit": 200, **params}).json()
+        assert body["total"] > 0 and len(body["items"]) == min(body["total"], 200)
+        return body["items"]
+
+    def total(**params):
+        return authed.get("/api/lots", params=params).json()["total"]
+
+    def count(condition, *args):
+        return conn.execute(f"SELECT count(*) AS n FROM lots WHERE {condition}",
+                            args).fetchone()["n"]
+
+    assert authed.get("/api/lots", params={"limit": 5}).json()["total"] == count("TRUE")
+    found = matching(make=lot["make"].lower())  # any case
+    assert {i["make"] for i in found} == {lot["make"]}
+    assert len(found) == count("make = %s", lot["make"])  # a page holds them all
+    found = matching(make=lot["make"], model=lot["model_group"][:2].lower())
+    assert all(i["model_group"].startswith(lot["model_group"][:2]) for i in found)
+    found = matching(year_min=lot["year"], year_max=lot["year"])
+    assert {i["year"] for i in found} == {lot["year"]}
+    assert total(damage=lot["damage_primary"]) == count(
+        "damage_primary = %s", lot["damage_primary"])
+    assert {i["location_state"] for i in matching(location_state=lot["location_state"])} == {
+        lot["location_state"]}
+    assert {i["yard_name"] for i in matching(yard=lot["yard_name"].lower())} == {lot["yard_name"]}
+    day = lot["sale_date"].isoformat()
+    assert total(sale_from=day, sale_to=day) == count("sale_date = %s", lot["sale_date"])
+    assert total(keys=lot["has_keys"]) == count("has_keys = %s", lot["has_keys"])
+    assert total(runs=lot["runs_drives"]) == count("runs_drives = %s", lot["runs_drives"])
+    found = matching(odometer_max=int(lot["odometer"]))
+    assert all(float(i["odometer"]) <= lot["odometer"] for i in found)
+    everything = {k: str(v) for k, v in lot.items() if k not in ("model_group", "odometer")}
+    combined = {"make": everything["make"], "year_min": everything["year"],
+                "damage": everything["damage_primary"], "yard": everything["yard_name"],
+                "location_state": everything["location_state"], "runs": everything["runs_drives"],
+                "keys": everything["has_keys"], "sale_from": everything["sale_date"],
+                "odometer_max": int(lot["odometer"])}
+    assert len(matching(**combined)) >= 1
+    # blank filters are ignored; a LIKE wildcard in the model is taken literally
+    assert total(make=" ", damage="") == count("TRUE")
+    assert total(model="%") == 0
+    assert authed.get("/api/lots", params={"year_min": "new"}).status_code == 422
+    assert authed.get("/api/lots", params={"sale_from": "tomorrow"}).status_code == 422
+
+
+def test_lot_filter_options_list_the_values_of_active_lots(authed, conn, settings, make_export):
+    process_file(conn, make_export(), COPART, settings)
+    conn.execute("UPDATE lots SET removed_at = now(), make = 'ZZZ GONE' WHERE lot_number = %s",
+                 (read_sample()[1][0][read_sample()[0].index("Lot number")],))
+    options = authed.get("/api/lot-filters").json()
+    active = "FROM lots WHERE removed_at IS NULL"
+    for key, column in (("makes", "make"), ("damages", "damage_primary"),
+                        ("states", "location_state"), ("yards", "yard_name"),
+                        ("keys", "has_keys"), ("runs", "runs_drives")):
+        expected = [r["v"] for r in conn.execute(
+            f"SELECT DISTINCT {column} AS v {active} AND {column} <> '' ORDER BY 1")]
+        assert options[key] == expected
+    assert "ZZZ GONE" not in options["makes"]
+    conn.execute("DELETE FROM lot_versions")
+    conn.execute("DELETE FROM lots")
+    assert authed.get("/api/lot-filters").json() == options  # cached for 15 min
+
+
+def test_lot_filter_options_of_an_empty_inventory(authed):
+    assert authed.get("/api/lot-filters").json() == {
+        "makes": [], "damages": [], "states": [], "yards": [], "keys": [], "runs": []}
