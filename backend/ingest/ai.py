@@ -19,21 +19,35 @@ from .config import Settings
 TIMEOUT = 300.0  # seconds per attempt; photos plus a long structured answer take a while
 MAX_TOKENS = 32000  # thinking and the answer; streamed, so no HTTP timeout at this size
 
+# USD per million input and output tokens (thinking is billed as output), as of 2026-09. Update
+# with Anthropic's prices; a model missing here still works, without a cost.
+PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0),
+          "claude-haiku-4-5": (1.0, 5.0), "claude-fable-5-1": (10.0, 50.0)}
+
+
+def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    price = PRICES.get(model)
+    if price is None:
+        return None
+    return round((input_tokens * price[0] + output_tokens * price[1]) / 1_000_000, 6)
+
 
 @dataclass(frozen=True)
 class Reply:
     data: Any  # the parsed JSON answer
     raw: str  # the answer as returned
     request_id: str | None
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)  # model, tokens in and out, cost_usd
 
 
 class AIError(Exception):
-    """The provider gave no usable answer; `raw` keeps whatever it returned, for debugging."""
+    """The provider gave no usable answer; `raw` keeps whatever it returned, for debugging, and
+    `usage` what an answer that came back but could not be used cost."""
 
-    def __init__(self, message: str, raw: str | None = None, request_id: str | None = None):
+    def __init__(self, message: str, raw: str | None = None, request_id: str | None = None,
+                 usage: dict[str, Any] | None = None):
         super().__init__(message)
-        self.raw, self.request_id = raw, request_id
+        self.raw, self.request_id, self.usage = raw, request_id, usage
 
 
 # A request's content, in order: text, or a JPEG photo as bytes.
@@ -68,19 +82,22 @@ def ask_anthropic(settings: Settings, system: str, parts: list[Part],
                       request_id=exc.request_id) from exc
     except anthropic.AnthropicError as exc:  # timeout, connection, missing API key
         raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}") from exc
-    raw ="".join(b.text for b in message.content if b.type == "text")
+    tokens_in, tokens_out = message.usage.input_tokens, message.usage.output_tokens
+    # ponytail: priced at the answering model's rate; after a server-side fallback the declined
+    # attempt (usage.iterations) is not counted. Sum the iterations if fallbacks become common.
+    usage = {"model": message.model, "input_tokens": tokens_in, "output_tokens": tokens_out,
+             "cost_usd": cost_usd(message.model, tokens_in, tokens_out)}
+    raw = "".join(b.text for b in message.content if b.type == "text")
     if message.stop_reason == "refusal":
         category = message.stop_details.category if message.stop_details else None
         raise AIError(f"the model declined the request ({category or 'no category'})",
-                      raw, request_id)
+                      raw, request_id, usage)
     if message.stop_reason == "max_tokens":
-        raise AIError("the answer was cut off at the token limit", raw, request_id)
+        raise AIError("the answer was cut off at the token limit", raw, request_id, usage)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise AIError(f"the answer is not valid JSON: {exc}", raw, request_id) from exc
-    usage = {"model": message.model, "input_tokens": message.usage.input_tokens,
-             "output_tokens": message.usage.output_tokens}
+        raise AIError(f"the answer is not valid JSON: {exc}", raw, request_id, usage) from exc
     return Reply(data, raw, request_id, usage)
 
 

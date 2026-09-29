@@ -233,6 +233,15 @@ export interface AnalysisImage extends LotImage {
   position: number;
 }
 
+/** Tokens and cost of one model call. No `cost_usd` for a model without a known price (null)
+ * or an analysis made before costs were recorded (absent). */
+export interface AIUsage {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd?: number | null;
+}
+
 export interface VehicleAnalysis {
   id: number;
   source: string;
@@ -247,6 +256,8 @@ export interface VehicleAnalysis {
   images: AnalysisImage[] | null;
   image_count: number | null;
   result: AnalysisResult | null;
+  /** Per model call: choosing the photos (only for lots with many), then the analysis. */
+  usage: { selection?: AIUsage | null; analysis?: AIUsage | null } | null;
   error: string | null;
   created_at: string;
   started_at: string | null;

@@ -532,8 +532,8 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
 
     # --- AI damage analysis (run by the worker, vehicle_analysis.py) ----------------------------
     ANALYSIS_COLUMNS = """id, source, lot_number, status, language, requested_by, provider,
-        model, prompt_version, schema_version, images, image_count, result, error, created_at,
-        started_at, completed_at, updated_at"""
+        model, prompt_version, schema_version, images, image_count, result, usage, error,
+        created_at, started_at, completed_at, updated_at"""
 
     def lot_exists(conn: psycopg.Connection, source: str, lot_number: str) -> None:
         if conn.execute("SELECT 1 FROM lots WHERE source = %s AND lot_number = %s",

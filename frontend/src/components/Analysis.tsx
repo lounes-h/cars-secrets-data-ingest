@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
-  api, type AnalysisImage, type DamageRegion, type DamageSeverity, type LotAnalyses,
+  api, type AIUsage, type AnalysisImage, type DamageRegion, type DamageSeverity, type LotAnalyses,
   type ObservedDamage, type VehicleAnalysis,
 } from "../lib/api";
-import { dateTime } from "../lib/format";
+import { dateTime, int } from "../lib/format";
 import { Badge, QueryState } from "./ui";
 
 // The AI condition and damage analysis of a lot: generated on request by the worker, shown on
@@ -29,6 +29,25 @@ export function words(snake: string): string {
 }
 
 const percent = (confidence: number) => `${Math.round(confidence * 100)}%`;
+
+const usd = new Intl.NumberFormat("en-US", {
+  style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 3,
+});
+const STEP_NAMES: Record<string, string> = { selection: "photo selection", analysis: "analysis" };
+
+/** "14,210 tokens (11,000 in, 3,210 out) · $0.108 (photo selection $0.021, analysis $0.087)" */
+export function spent(usage: VehicleAnalysis["usage"]): string | null {
+  const steps = Object.entries(usage ?? {}).filter((e): e is [string, AIUsage] => !!e[1]);
+  if (steps.length === 0) return null;
+  const input = steps.reduce((n, [, u]) => n + u.input_tokens, 0);
+  const output = steps.reduce((n, [, u]) => n + u.output_tokens, 0);
+  const known = steps.every(([, u]) => u.cost_usd != null);
+  const cost = known ? usd.format(steps.reduce((n, [, u]) => n + u.cost_usd!, 0)) : "cost unknown";
+  const parts = known && steps.length > 1
+    ? ` (${steps.map(([step, u]) => `${STEP_NAMES[step]} ${usd.format(u.cost_usd!)}`).join(", ")})`
+    : "";
+  return `${int(input + output)} tokens (${int(input)} in, ${int(output)} out) · ${cost}${parts}`;
+}
 
 const SEVERITY_TONE = { severe: "critical", moderate: "warning", minor: "info", unknown: "neutral" } as const;
 
@@ -74,6 +93,7 @@ function Progress({ current, latest }: LotAnalyses) {
         <Badge tone="warning">failed</Badge>
         <span className="wrap-anywhere">
           The latest analysis failed ({dateTime(current.completed_at)}): {current.error}
+          {spent(current.usage) && ` It used ${spent(current.usage)}.`}
           {latest && " The previous analysis is shown."}
         </span>
       </div>
@@ -151,6 +171,7 @@ function Result({ analysis }: { analysis: VehicleAnalysis }) {
         {analysis.provider} {analysis.model} · prompt {analysis.prompt_version} · schema {analysis.schema_version}
         {" · "}{analysis.image_count} photos · {dateTime(analysis.completed_at)}
         {analysis.requested_by && ` · requested by ${analysis.requested_by}`}
+        {spent(analysis.usage) && <><br />Used {spent(analysis.usage)}</>}
       </p>
 
       <h3>General Summary</h3>

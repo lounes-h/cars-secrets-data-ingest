@@ -428,6 +428,20 @@ class AnalysisError(Exception):
     """The analysis cannot be made (no photos, unknown configuration, …)."""
 
 
+def ask(settings: Settings, record: dict[str, Any], step: str, system: str,
+        parts: list[ai.Part], schema: dict[str, Any]) -> ai.Reply:
+    """`ai.ask`, keeping the tokens and cost of the call under `usage[step]`, also when the
+    answer that came back cannot be used (it is billed all the same)."""
+    try:
+        reply = ai.ask(settings, system, parts, schema)
+    except ai.AIError as exc:
+        if exc.usage:
+            record["usage"][step] = exc.usage
+        raise
+    record["usage"][step] = reply.usage
+    return reply
+
+
 def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photos: list[Photo],
                   record: dict[str, Any]) -> list[Photo]:
     if len(photos) <= settings.ai_max_images:
@@ -438,8 +452,9 @@ def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photo
         f"secondary damage {lot.get('damage_secondary') or 'none'}. {len(photos)} photos:"]
     for photo_id, photo in zip(ids, photos, strict=True):
         parts += [photo_id, shrink(photo.jpeg, SELECTION_PX)[0]]
-    reply = ai.ask(settings, prompt.select, parts, Selection.model_json_schema())
-    record["selection"].update(request_id=reply.request_id, usage=reply.usage)
+    reply = ask(settings, record, "selection", prompt.select, parts,
+                Selection.model_json_schema())
+    record["selection"]["request_id"] = reply.request_id
     try:
         selection = Selection.model_validate(reply.data)
     except ValueError as exc:
@@ -462,6 +477,7 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
     lot = conn.execute("SELECT * FROM lots WHERE source = %s AND lot_number = %s",
                        (analysis["source"], analysis["lot_number"])).fetchone()
     record["input_snapshot"] = snapshot = metadata(lot)
+    record["usage"] = {}
     provider = PROVIDERS.get(analysis["source"])
     listing = provider.fetch_images(lot) if provider and provider.fetch_images else None
     images = listing.images if listing else []
@@ -491,9 +507,8 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
     system = prompt.analyze.format(language=LANGUAGES[language], language_code=language,
                                    schema_version=analysis["schema_version"])
     schema = SCHEMAS[analysis["schema_version"]]
-    reply = ai.ask(settings, system, parts, schema.model_json_schema())
-    record.update(raw_response=reply.raw, provider_request_id=reply.request_id,
-                  usage={"analysis": reply.usage, "selection": record["selection"].get("usage")})
+    reply = ask(settings, record, "analysis", system, parts, schema.model_json_schema())
+    record.update(raw_response=reply.raw, provider_request_id=reply.request_id)
     return validate(reply.data, analysis["schema_version"], {s["image_id"] for s in sent},
                     language)
 

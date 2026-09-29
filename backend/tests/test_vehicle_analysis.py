@@ -282,7 +282,9 @@ def test_photos_are_selected_shrunk_and_analyzed(conn, settings, lot, monkeypatc
     assert row["selection"]["unavailable"][0]["position"] == 2
     assert row["input_snapshot"]["damage_primary"] == lot.damage
     assert row["provider_request_id"] == "req_2"
-    assert row["usage"]["selection"]["input_tokens"] == 10
+    assert row["usage"] == {step: {"model": "claude-opus-5-5", "input_tokens": 10,
+                                   "output_tokens": 5} for step in ("selection", "analysis")}
+    assert row["selection"]["request_id"] == "req_1" and "usage" not in row["selection"]
     assert json.loads(row["raw_response"]) == answer()
 
     select, analyze = fake.calls
@@ -348,13 +350,17 @@ def test_a_provider_without_photos_fails(conn, settings, lot, monkeypatch):
 def test_a_rejected_request_or_answer_keeps_what_the_provider_returned(
         conn, settings, lot, monkeypatch):
     lot.photos["https://cs.copart.com/a_ful.jpg"] = jpeg()
-    FakeAI(monkeypatch, analysis=ai.AIError("the answer is not valid JSON", "{oops", "req_9"))
+    spent = {"model": "claude-opus-5-5", "input_tokens": 3000, "output_tokens": 900,
+             "cost_usd": 0.03}
+    FakeAI(monkeypatch, analysis=ai.AIError("the answer is not valid JSON", "{oops", "req_9",
+                                            spent))
     first = queue(conn, lot.number)
     va.process_next(conn, settings)
     row = stored(conn, first)
     assert row["status"] == "failed"
     assert row["error"] == "AIError: the answer is not valid JSON"
     assert (row["raw_response"], row["provider_request_id"]) == ("{oops", "req_9")
+    assert row["usage"] == {"analysis": spent}  # an unusable answer is billed all the same
     assert row["images"][0]["image_id"] == "image_01"  # the input is kept for debugging
 
     bad = answer()
@@ -378,6 +384,7 @@ def test_an_invalid_photo_selection_fails(conn, settings, lot, monkeypatch):
     row = stored(conn, analysis_id)
     assert row["error"].startswith("AIError: invalid photo selection")
     assert row["provider_request_id"] == "req_1"
+    assert list(row["usage"]) == ["selection"]
 
 
 def test_interrupted_analyses_fail(conn, lot):
@@ -418,6 +425,7 @@ def test_request_run_and_regenerate_through_the_api(authed, conn, settings, lot,
     assert body["latest"]["id"] == body["current"]["id"] == queued.json()["id"]
     assert body["latest"]["result"]["language"] == "en"
     assert body["latest"]["images"][0]["full"] == "https://cs.copart.com/a_ful.jpg"
+    assert body["latest"]["usage"]["analysis"]["output_tokens"] == 5
 
     # a failed regeneration leaves the completed analysis in place
     assert authed.post(url).status_code == 202
@@ -493,7 +501,8 @@ def test_anthropic_client_sends_photos_and_the_schema(settings, monkeypatch):
     reply = ai.ask(settings, "system prompt", ["photo_01", b"\xff\xd8"],
                    va.Selection.model_json_schema())
     assert reply == ai.Reply({"photos": []}, '{"photos": []}', "req_abc", {
-        "model": "claude-opus-5-5", "input_tokens": 1200, "output_tokens": 800})
+        "model": "claude-opus-5-5", "input_tokens": 1200, "output_tokens": 800,
+        "cost_usd": 0.0208})  # 1,200 x $4 + 800 x $20 per million
     assert clients == [{"api_key": "sk-test", "timeout": ai.TIMEOUT}]
     assert sent["model"] == "claude-opus-5-5" and sent["system"] == "system prompt"
     assert sent["messages"][0]["content"] == [
@@ -518,6 +527,7 @@ def test_anthropic_answers_that_are_not_usable_fail_with_the_raw_text(
     with pytest.raises(ai.AIError, match=re.escape(error)) as caught:
         ai.ask(settings, "s", ["t"], {"type": "object"})
     assert (caught.value.raw, caught.value.request_id) == (raw, "req_abc")
+    assert caught.value.usage["cost_usd"] == 0.0208  # the answer came back: it is billed
 
 
 def test_anthropic_errors_become_ai_errors(settings, monkeypatch):
@@ -532,6 +542,11 @@ def test_anthropic_errors_become_ai_errors(settings, monkeypatch):
     fake_anthropic(monkeypatch, anthropic.APITimeoutError(request=request))
     with pytest.raises(ai.AIError, match="the AI request failed: APITimeoutError"):
         ai.ask(settings, "s", ["t"], {"type": "object"})
+
+
+def test_cost_follows_the_model_price_and_is_unknown_for_other_models():
+    assert ai.cost_usd("claude-sonnet-5-5", 1_000_000, 100_000) == 3.0
+    assert ai.cost_usd("claude-opus-4-8", 1000, 1000) is None
 
 
 def test_an_unknown_provider_is_an_error(settings):

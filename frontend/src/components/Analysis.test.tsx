@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
 import { api, ApiError, type AnalysisResult, type LotAnalyses, type VehicleAnalysis } from "../lib/api";
-import { AnalysisButton, AnalysisSection, words } from "./Analysis";
+import { AnalysisButton, AnalysisSection, spent, words } from "./Analysis";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -50,11 +50,16 @@ const completed: VehicleAnalysis = {
     { image_id: "image_03", position: 7, thumb: "https://cs.copart.com/7_thb.jpg", full: null, hd: null },
   ],
   image_count: 3, result, error: null, created_at: "2026-09-28T10:00:00Z",
+  usage: {
+    selection: { model: "claude-opus-5-5", input_tokens: 2400, output_tokens: 600, cost_usd: 0.0216 },
+    analysis: { model: "claude-opus-5-5", input_tokens: 9000, output_tokens: 3500, cost_usd: 0.106 },
+  },
   started_at: "2026-09-28T10:00:02Z", completed_at: "2026-09-28T10:01:30Z", updated_at: "2026-09-28T10:01:30Z",
 };
 
 const attempt = (status: VehicleAnalysis["status"], extra: Partial<VehicleAnalysis> = {}): VehicleAnalysis => ({
-  ...completed, id: 2, status, images: null, image_count: null, result: null, completed_at: null, ...extra,
+  ...completed, id: 2, status, images: null, image_count: null, result: null, usage: null,
+  completed_at: null, ...extra,
 });
 
 function show(data: LotAnalyses | Error) {
@@ -101,6 +106,9 @@ describe("AI analysis", () => {
     expect(screen.getByText("No photo of the underside.")).toBeInTheDocument();
     expect(screen.getByText(/claude-opus-5-5 · prompt vehicle-damage-v1 · schema 1.0 · 3 photos/)).toBeInTheDocument();
     expect(screen.getByText(/requested by admin/)).toBeInTheDocument();
+    expect(screen.getByText(
+      /Used 15,500 tokens \(11,400 in, 4,100 out\) · \$0\.128 \(photo selection \$0\.022, analysis \$0\.106\)/,
+    )).toBeInTheDocument();
     expect(screen.getByText("Raw analysis JSON").closest("details")).toHaveTextContent('"schema_version": "1.0"');
   });
 
@@ -126,10 +134,11 @@ describe("AI analysis", () => {
 
   it("keeps the previous analysis when a regeneration fails, and says so", async () => {
     const load = show({ latest: completed, current: attempt("failed", {
-      error: "AIError: the AI provider rejected the request (529): overloaded",
-      completed_at: "2026-09-28T11:00:00Z" }) });
+      error: "AIError: the answer is not valid JSON", completed_at: "2026-09-28T11:00:00Z",
+      usage: { analysis: { model: "claude-opus-5-5", input_tokens: 800, output_tokens: 200, cost_usd: 0.0072 } },
+    }) });
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /The latest analysis failed .*: AIError: the AI provider rejected the request \(529\): overloaded The previous analysis is shown\./);
+      /The latest analysis failed .*: AIError: the answer is not valid JSON It used 1,000 tokens \(800 in, 200 out\) · \$0\.007\. The previous analysis is shown\./);
     expect(screen.getByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
 
     vi.spyOn(api, "requestAnalysis").mockResolvedValue(attempt("queued", { id: 3 }));
@@ -182,6 +191,17 @@ describe("AI analysis", () => {
     show(new Error("lot not found"));
     expect(await screen.findByText("lot not found")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "Generate AI Analysis" })).toBeDisabled());
+  });
+});
+
+describe("spent", () => {
+  it("adds up the calls, and says when a model has no known price", () => {
+    expect(spent(null)).toBeNull();
+    expect(spent({ selection: null })).toBeNull();
+    expect(spent({ selection: null, analysis: { model: "claude-opus-4-8", input_tokens: 10, output_tokens: 5, cost_usd: null } }))
+      .toBe("15 tokens (10 in, 5 out) · cost unknown");
+    expect(spent({ analysis: { model: "claude-opus-5-5", input_tokens: 10, output_tokens: 5 } }))
+      .toBe("15 tokens (10 in, 5 out) · cost unknown");  // made before costs were recorded
   });
 });
 

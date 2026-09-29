@@ -143,7 +143,9 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   (schema and every cross-reference: regions mark observed damage on a photo it cites; hidden
   damage has no box). Changing the prompt or the answer's shape = a new entry in `PROMPTS` or
   `SCHEMAS` under a new version, never an edit of a released one. Another model provider = a
-  function in `ai.CLIENTS`. No costs, values or bids in the analysis.
+  function in `ai.CLIENTS`. No costs, values or bids in the analysis. Each model call's
+  tokens and cost are stored in `usage` and shown on the page; keep `ai.PRICES` in step
+  with the provider's prices.
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API

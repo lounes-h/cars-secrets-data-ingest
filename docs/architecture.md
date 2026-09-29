@@ -51,7 +51,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
 | `alerts` | Alerts; at most one unresolved row per `fingerprint` |
 | `worker_heartbeat` | Liveness of the worker |
-| `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, token usage, error, timestamps |
+| `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, tokens and cost of each model call (`usage`), error, timestamps |
 
 ### Why the schema survives CSV changes
 
@@ -356,6 +356,14 @@ Regenerating inserts a new row; nothing is overwritten. `GET .../analyses` retur
 completed analysis (shown) and the latest request of any status (progress, or a failure after
 it), so a failed regeneration never hides the previous analysis. The page draws each region
 over the original photo from its normalized box.
+
+`usage` keeps, per model call (`selection`, `analysis`), the answering model, input and output
+tokens (photos count as input, thinking as output) and `cost_usd`. The cost is computed when
+the call is made, from `ai.PRICES` (USD per million tokens, as of 2026-09): keep that table in
+step with Anthropic's prices. A model missing from it has no cost; the page then says "cost
+unknown". A call whose answer came back unusable (refused, cut off, not JSON, invalid) is
+billed, so it is recorded too, and a failed attempt shows what it spent. After a server-side
+fallback only the answering model's tokens are priced.
 
 The Anthropic client uses `claude-opus-5-5` at high effort, streams the answer (up to 32k
 tokens, 300 s timeout) and opts into server-side fallback, which re-runs a request a safety
