@@ -69,7 +69,7 @@ and renaming it when done is best: `.part`, `.tmp` and `.crdownload` files are i
 | Runs | A live countdown to the next download with a **Download now** button (or why none is coming: paused, not running, not set up), then every file received: status, row counts, duration. Detail view shows rejected rows, run alerts, columns, and a retry button for failed files |
 | Alerts | Open/resolved alerts with severity filter; acknowledge and resolve |
 | Schema | Every column a provider has sent, what it maps to, and when it appeared or disappeared |
-| Lots | Search by lot number, VIN, make or model, with thumbnails; mark lots as favorites (☆) and list only them; per lot: photo gallery (full size + HD), a link to the lot on the auction site (all photos, bidding) and field-by-field change history |
+| Lots | Search by lot number, VIN, make or model, with thumbnails; filters (make, model, year, damage, state, yard, sale date, keys, runs/drives, odometer) with the number of matching lots; mark lots as favorites (☆) and list only them; per lot: photo gallery (full size + HD), a link to the lot on the auction site (all photos, bidding) and field-by-field change history |
 
 New warning and critical alerts pop up on whatever page is open (Server-Sent Events).
 
