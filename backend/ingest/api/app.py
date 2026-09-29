@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -16,7 +17,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import Settings, get_settings
 from ..db import EVENTS_CHANNEL
@@ -31,6 +32,51 @@ LOT_COLUMNS = """source, lot_number, year, make, model_group, model_detail, trim
     damage_primary, damage_secondary, odometer, est_retail_value, repair_cost, high_bid,
     buy_it_now_price, currency, sale_status, sale_at, yard_code, yard_name, location_city,
     location_state, thumbnail_url, first_seen_at, last_seen_at, last_changed_at, removed_at"""
+
+
+# Lots page filters: query parameter -> condition on `lots`. Makes and yards are matched
+# whatever their case (the export writes them in capitals); a model matches by its start.
+LOT_FILTERS = {
+    "make": "make = upper(%(make)s)",
+    "model": "model_group ILIKE %(model)s",
+    "year_min": "year >= %(year_min)s",
+    "year_max": "year <= %(year_max)s",
+    "damage": "damage_primary = %(damage)s",
+    "location_state": "location_state = %(location_state)s",
+    "yard": "yard_name = upper(%(yard)s)",
+    "sale_from": "sale_date >= %(sale_from)s",
+    "sale_to": "sale_date <= %(sale_to)s",
+    "keys": "has_keys = %(keys)s",
+    "runs": "runs_drives = %(runs)s",
+    "odometer_max": "odometer <= %(odometer_max)s",
+}
+
+
+class LotQuery(BaseModel):
+    """The Lots page's query: search, state, paging and filters (see LOT_FILTERS)."""
+
+    q: str = ""
+    source: str | None = None
+    state: Literal["active", "removed", "all"] = "all"
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+    make: str | None = None
+    model: str | None = None
+    year_min: int | None = None
+    year_max: int | None = None
+    damage: str | None = None
+    location_state: str | None = None
+    yard: str | None = None
+    sale_from: date | None = None
+    sale_to: date | None = None
+    keys: str | None = None
+    runs: str | None = None
+    odometer_max: int | None = None
+
+
+def like_prefix(text: str) -> str:
+    """A LIKE pattern matching values that start with `text`, taken literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 class TTLCache:
@@ -108,6 +154,7 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     broker = EventBroker()
     limiter = auth.LoginRateLimiter()
     image_cache = TTLCache(ttl_seconds=15 * 60)
+    filter_cache = TTLCache(ttl_seconds=15 * 60)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -459,11 +506,9 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
 
     # --- lots ------------------------------------------------------------------------------------
     @api.get("/lots")
-    def lots(
-        conn: Conn, q: str = "", source: str | None = None,
-        state: Literal["active", "removed", "all"] = "all",
-        limit: Annotated[int, Query(ge=1, le=200)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
-    ) -> dict[str, Any]:
+    def lots(conn: Conn, query: Annotated[LotQuery, Query()]) -> dict[str, Any]:
+        """One page of lots, most recently changed first, and how many match in all."""
+        q, source, state = query.q, query.source, query.state
         where = ["(%(source)s::text IS NULL OR source = %(source)s)"]
         if state == "active":
             where.append("removed_at IS NULL")
@@ -473,15 +518,44 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         if q:
             where.append("""(lot_number = %(q)s OR vin = upper(%(q)s)
                              OR make ILIKE %(prefix)s OR model_group ILIKE %(prefix)s)""")
+        given = {k: v.strip() if isinstance(v, str) else v
+                 for k, v in query.model_dump(include=set(LOT_FILTERS)).items() if v is not None}
+        given = {k: v for k, v in given.items() if v != ""}
+        if "model" in given:
+            given["model"] = like_prefix(given["model"])
+        where += [LOT_FILTERS[k] for k in given]
         clause = " AND ".join(where)
-        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params = {"source": source, "q": q, "prefix": escaped + "%",
-                  "limit": limit, "offset": offset}
+        params = {"source": source, "q": q, "prefix": like_prefix(q),
+                  "limit": query.limit, "offset": query.offset, **given}
         items = conn.execute(
             f"""SELECT {LOT_COLUMNS} FROM lots WHERE {clause}
                 ORDER BY last_changed_at DESC LIMIT %(limit)s OFFSET %(offset)s""", params,
         ).fetchall()
-        return {"items": items}
+        total = conn.execute(f"SELECT count(*) AS n FROM lots WHERE {clause}", params).fetchone()
+        return {"items": items, "total": total["n"]}
+
+    @api.get("/lot-filters")
+    def lot_filters(conn: Conn) -> dict[str, list[str]]:
+        """The values the Lots page's filters offer: those of the active lots (cached; one
+        pass over the table takes a few hundred ms)."""
+        options = filter_cache.get("options")
+        if options is None:
+            options = conn.execute(
+                """SELECT coalesce(array_agg(DISTINCT make ORDER BY make)
+                                   FILTER (WHERE make <> ''), '{}') AS makes,
+                          coalesce(array_agg(DISTINCT damage_primary ORDER BY damage_primary)
+                                   FILTER (WHERE damage_primary <> ''), '{}') AS damages,
+                          coalesce(array_agg(DISTINCT location_state ORDER BY location_state)
+                                   FILTER (WHERE location_state <> ''), '{}') AS states,
+                          coalesce(array_agg(DISTINCT yard_name ORDER BY yard_name)
+                                   FILTER (WHERE yard_name <> ''), '{}') AS yards,
+                          coalesce(array_agg(DISTINCT has_keys ORDER BY has_keys)
+                                   FILTER (WHERE has_keys <> ''), '{}') AS keys,
+                          coalesce(array_agg(DISTINCT runs_drives ORDER BY runs_drives)
+                                   FILTER (WHERE runs_drives <> ''), '{}') AS runs
+                   FROM lots WHERE removed_at IS NULL""").fetchone()
+            filter_cache.put("options", options)
+        return options
 
     @api.get("/lots/{source}/{lot_number}")
     def lot_detail(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
