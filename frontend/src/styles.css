@@ -295,3 +295,7 @@ pre { background: var(--surface-2); padding: 8px 10px; border-radius: 8px; overf
 .model-option input { margin-top: 3px; }
 .model-note { display: block; margin-top: 2px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.analysis h5 { font-size: 12.5px; margin: 12px 0 4px; font-weight: 600; color: var(--ink-2); }
+.sent-call { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.sent-call > summary { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0; }
+.prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; }

@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
-  api, type AIUsage, type AnalysisImage, type DamageRegion, type DamageSeverity, type LotAnalyses,
-  type ObservedDamage, type VehicleAnalysis,
+  api, type AIUsage, type AnalysisImage, type AnalysisRequestRecord, type DamageRegion,
+  type DamageSeverity, type LotAnalyses, type ObservedDamage, type SentContent, type SentRequest,
+  type VehicleAnalysis,
 } from "../lib/api";
-import { dateTime, int } from "../lib/format";
+import { bytes, dateTime, int } from "../lib/format";
 import { Badge, QueryState } from "./ui";
 
 // The AI condition and damage analysis of a lot: generated on request by the worker, shown on
@@ -189,6 +190,61 @@ function DamagePhoto({ image, regions, damage }: {
   );
 }
 
+/** The message as sent: a photo's ID and the photo that follows it share a line. */
+function SentMessage({ content }: { content: SentContent[] }) {
+  const blocks: ReactNode[] = [];
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i];
+    const next = content[i + 1];
+    if (block.type === "text" && next?.type === "image") {
+      blocks.push(<div key={i} className="mono small">{block.text}: JPEG photo, {bytes(next.bytes)}</div>);
+      i++;
+    } else if (block.type === "text") {
+      blocks.push(<pre key={i} className="prompt">{block.text}</pre>);
+    } else {
+      blocks.push(<div key={i} className="mono small">JPEG photo, {bytes(block.bytes)}</div>);
+    }
+  }
+  return <>{blocks}</>;
+}
+
+function SentCall({ title, sent }: { title: string; sent: SentRequest }) {
+  const { system, messages, output_config: { format, ...output }, ...params } = sent;
+  const photos = messages[0].content.filter((b) => b.type === "image").length;
+  return (
+    <details className="sent-call">
+      <summary>{title} · {sent.model} · {photos} photos</summary>
+      <h5>Parameters</h5>
+      <pre>{JSON.stringify({ ...params, output_config: { ...output, format: format.type } }, null, 2)}</pre>
+      <h5>System prompt</h5>
+      <pre className="prompt">{system}</pre>
+      <h5>User message</h5>
+      <SentMessage content={messages[0].content} />
+      <details>
+        <summary className="small">Output schema ({format.type})</summary>
+        <pre>{JSON.stringify(format.schema, null, 2)}</pre>
+      </details>
+    </details>
+  );
+}
+
+function RequestRecord({ request }: { request: AnalysisRequestRecord | null }) {
+  if (!request) {
+    return <p className="muted">Not recorded: this analysis was made before requests were kept. Regenerate it to see one.</p>;
+  }
+  return (
+    <>
+      <dl className="kv small">
+        {Object.entries(request.settings).map(([k, v]) => (
+          <div key={k} style={{ display: "contents" }}><dt className="mono">{k}</dt><dd>{v}</dd></div>
+        ))}
+      </dl>
+      {request.selection && <SentCall title="Photo selection call" sent={request.selection} />}
+      {request.analysis && <SentCall title="Analysis call" sent={request.analysis} />}
+    </>
+  );
+}
+
 function List({ items, empty }: { items: string[]; empty: string }) {
   return items.length ? <ul>{items.map((t, i) => <li key={i}>{t}</li>)}</ul> : <p className="muted">{empty}</p>;
 }
@@ -287,6 +343,9 @@ function Result({ analysis }: { analysis: VehicleAnalysis }) {
 
       <h3>Limitations</h3>
       <List items={result.limitations} empty="None stated." />
+
+      <h3>Prompt and Request</h3>
+      <RequestRecord request={analysis.request} />
 
       <details>
         <summary className="small">Raw analysis JSON</summary>

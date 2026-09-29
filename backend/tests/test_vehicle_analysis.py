@@ -234,7 +234,8 @@ class FakeAI:
         if isinstance(data, Exception):
             raise data
         return ai.Reply(data, json.dumps(data), f"req_{len(self.calls)}",
-                        {"model": settings.ai_model, "input_tokens": 10, "output_tokens": 5})
+                        {"model": settings.ai_model, "input_tokens": 10, "output_tokens": 5},
+                        {"model": settings.ai_model, "system": system})
 
 
 def queue(conn, number, language="en"):
@@ -286,6 +287,14 @@ def test_photos_are_selected_shrunk_and_analyzed(conn, settings, lot, monkeypatc
                                    "output_tokens": 5} for step in ("selection", "analysis")}
     assert row["selection"]["request_id"] == "req_1" and "usage" not in row["selection"]
     assert json.loads(row["raw_response"]) == answer()
+    assert row["request"] == {
+        "settings": {"provider": "anthropic", "model": "claude-opus-5-5",
+                     "prompt_version": "vehicle-damage-v1", "schema_version": "1.0",
+                     "language": "en", "max_images": 5, "image_max_px": 1024,
+                     "selection_px": 384, "damage_relevance": 0.5, "min_damage_photos": 2,
+                     "max_overview_photos": 2},
+        "selection": {"model": "claude-opus-5-5", "system": va.VEHICLE_DAMAGE_V1.select},
+        "analysis": {"model": "claude-opus-5-5", "system": fake.calls[1].system}}
 
     select, analyze = fake.calls
     assert f"primary damage {lot.damage}" in select.parts[0]
@@ -353,7 +362,7 @@ def test_a_rejected_request_or_answer_keeps_what_the_provider_returned(
     spent = {"model": "claude-opus-5-5", "input_tokens": 3000, "output_tokens": 900,
              "cost_usd": 0.03}
     FakeAI(monkeypatch, analysis=ai.AIError("the answer is not valid JSON", "{oops", "req_9",
-                                            spent))
+                                            spent, {"model": "claude-opus-5-5"}))
     first = queue(conn, lot.number)
     va.process_next(conn, settings)
     row = stored(conn, first)
@@ -361,6 +370,7 @@ def test_a_rejected_request_or_answer_keeps_what_the_provider_returned(
     assert row["error"] == "AIError: the answer is not valid JSON"
     assert (row["raw_response"], row["provider_request_id"]) == ("{oops", "req_9")
     assert row["usage"] == {"analysis": spent}  # an unusable answer is billed all the same
+    assert row["request"]["analysis"] == {"model": "claude-opus-5-5"}  # what failed is kept
     assert row["images"][0]["image_id"] == "image_01"  # the input is kept for debugging
 
     bad = answer()
@@ -524,9 +534,17 @@ def test_anthropic_client_sends_photos_and_the_schema(settings, monkeypatch):
     sent, clients = fake_anthropic(monkeypatch, message('{"photos": []}'))
     reply = ai.ask(settings, "system prompt", ["photo_01", b"\xff\xd8"],
                    va.Selection.model_json_schema())
-    assert reply == ai.Reply({"photos": []}, '{"photos": []}', "req_abc", {
-        "model": "claude-opus-5-5", "input_tokens": 1200, "output_tokens": 800,
-        "cost_usd": 0.0208})  # 1,200 x $4 + 800 x $20 per million
+    assert (reply.data, reply.raw, reply.request_id) == ({"photos": []}, '{"photos": []}',
+                                                         "req_abc")
+    assert reply.usage == {"model": "claude-opus-5-5", "input_tokens": 1200,
+                           "output_tokens": 800, "cost_usd": 0.0208}  # 1,200 x $4 + 800 x $20
+    # the record of what was sent: the same parameters, the photo by its size
+    content = [{"type": "text", "text": "photo_01"},
+               {"type": "image", "media_type": "image/jpeg", "bytes": 2}]
+    assert reply.request == {**{k: v for k, v in sent.items() if k != "messages"},
+                             "timeout_seconds": ai.TIMEOUT,
+                             "messages": [{"role": "user", "content": content}]}
+    assert sent["output_config"]["effort"] == "high" and sent["max_tokens"] == ai.MAX_TOKENS
     assert clients == [{"api_key": "sk-test", "timeout": ai.TIMEOUT}]
     assert sent["model"] == "claude-opus-5-5" and sent["system"] == "system prompt"
     assert sent["messages"][0]["content"] == [
@@ -552,6 +570,7 @@ def test_anthropic_answers_that_are_not_usable_fail_with_the_raw_text(
         ai.ask(settings, "s", ["t"], {"type": "object"})
     assert (caught.value.raw, caught.value.request_id) == (raw, "req_abc")
     assert caught.value.usage["cost_usd"] == 0.0208  # the answer came back: it is billed
+    assert caught.value.request["system"] == "s"
 
 
 def test_anthropic_errors_become_ai_errors(settings, monkeypatch):
@@ -561,11 +580,12 @@ def test_anthropic_errors_become_ai_errors(settings, monkeypatch):
         "image too large", response=response, body=None))
     with pytest.raises(ai.AIError, match=r"rejected the request \(400\): image too large") as e:
         ai.ask(settings, "s", ["t"], {"type": "object"})
-    assert e.value.request_id == "req_bad"
+    assert e.value.request_id == "req_bad" and e.value.request["model"] == "claude-opus-5-5"
 
     fake_anthropic(monkeypatch, anthropic.APITimeoutError(request=request))
-    with pytest.raises(ai.AIError, match="the AI request failed: APITimeoutError"):
+    with pytest.raises(ai.AIError, match="the AI request failed: APITimeoutError") as e:
         ai.ask(settings, "s", ["t"], {"type": "object"})
+    assert e.value.request["messages"][0]["content"] == [{"type": "text", "text": "t"}]
 
 
 def test_cost_follows_the_model_price_and_is_unknown_for_other_models():

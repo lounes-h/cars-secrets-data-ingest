@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
-import { api, ApiError, type AnalysisResult, type LotAnalyses, type VehicleAnalysis } from "../lib/api";
+import {
+  api, ApiError, type AnalysisResult, type LotAnalyses, type SentRequest, type VehicleAnalysis,
+} from "../lib/api";
 import { AnalysisButton, AnalysisSection, spent, words } from "./Analysis";
 
 afterEach(() => vi.restoreAllMocks());
@@ -40,6 +42,19 @@ const result: AnalysisResult = {
   limitations: ["No photo of the underside."],
 };
 
+const sent: SentRequest = {
+  model: "claude-opus-5-5", max_tokens: 32000, system: "You are a senior vehicle damage appraiser.",
+  output_config: { effort: "high", format: { type: "json_schema", schema: { type: "object", additionalProperties: false } } },
+  betas: ["server-side-fallback-2026-07-01"], fallbacks: "default", timeout_seconds: 300,
+  messages: [{
+    role: "user", content: [
+      { type: "text", text: 'Auction metadata (reported by the auction or the seller; may be incomplete or wrong):\n{"make": "ACURA"}' },
+      { type: "text", text: "image_01" }, { type: "image", media_type: "image/jpeg", bytes: 120832 },
+      { type: "image", media_type: "image/jpeg", bytes: 2048 },
+    ],
+  }],
+};
+
 const completed: VehicleAnalysis = {
   id: 1, source: "copart", lot_number: "68264956", status: "completed", language: "en",
   requested_by: "admin", provider: "anthropic", model: "claude-opus-5-5",
@@ -50,6 +65,11 @@ const completed: VehicleAnalysis = {
     { image_id: "image_03", position: 7, thumb: "https://cs.copart.com/7_thb.jpg", full: null, hd: null },
   ],
   image_count: 3, result, error: null, created_at: "2026-09-28T10:00:00Z",
+  request: {
+    settings: { provider: "anthropic", model: "claude-opus-5-5", prompt_version: "vehicle-damage-v1", image_max_px: 1024 },
+    selection: { ...sent, system: "You choose which auction photos an appraiser should study." },
+    analysis: sent,
+  },
   usage: {
     selection: { model: "claude-opus-5-5", input_tokens: 2400, output_tokens: 600, cost_usd: 0.0216 },
     analysis: { model: "claude-opus-5-5", input_tokens: 9000, output_tokens: 3500, cost_usd: 0.106 },
@@ -133,6 +153,25 @@ describe("AI analysis", () => {
     expect(screen.getByText("Raw analysis JSON").closest("details")).toHaveTextContent('"schema_version": "1.0"');
   });
 
+  it("shows the settings, prompts and request parameters each model call was sent", async () => {
+    show({ latest: completed, current: completed });
+    expect(await screen.findByRole("heading", { name: "Prompt and Request" })).toBeInTheDocument();
+    expect(screen.getByText("image_max_px").nextSibling).toHaveTextContent("1024");
+    expect(screen.getByText("Photo selection call · claude-opus-5-5 · 2 photos")).toBeInTheDocument();
+    const call = screen.getByText("Analysis call · claude-opus-5-5 · 2 photos").closest("details")!;
+    expect(within(call).getByText("You are a senior vehicle damage appraiser.")).toBeInTheDocument();
+    expect(within(call).getByText(/Auction metadata .* \{"make": "ACURA"\}/)).toBeInTheDocument();
+    expect(within(call).getByText("image_01: JPEG photo, 118.0 KB")).toBeInTheDocument();
+    expect(within(call).getByText("JPEG photo, 2.0 KB")).toBeInTheDocument();
+    const params = within(call).getByText("Parameters").nextElementSibling!;
+    expect(params).toHaveTextContent('"effort": "high"');
+    expect(params).toHaveTextContent('"format": "json_schema"');
+    expect(params).toHaveTextContent('"max_tokens": 32000');
+    expect(params).not.toHaveTextContent("senior vehicle damage appraiser");
+    expect(within(call).getByText("Output schema (json_schema)").closest("details"))
+      .toHaveTextContent('"additionalProperties": false');
+  });
+
   it("marks damage on the original photos and explains a marked area on hover or click", async () => {
     show({ latest: completed, current: completed });
     const box = await screen.findByRole("button", { name: "Front bumper damage, 90% confidence" });
@@ -192,12 +231,13 @@ describe("AI analysis", () => {
       damage_analysis: { summary: "No damage visible.", observed_damage: [], possible_hidden_damage: [] },
       damaged_parts: [], image_annotations: [], limitations: [],
     };
-    show({ latest: { ...completed, result: empty, requested_by: null }, current: null });
+    show({ latest: { ...completed, result: empty, requested_by: null, request: null }, current: null });
     expect(await screen.findByText("No damage visible in the photos.")).toBeInTheDocument();
     expect(screen.getByText("None suspected.")).toBeInTheDocument();
     expect(screen.getAllByText("None.")).toHaveLength(3);
     expect(screen.getByText("None stated.")).toBeInTheDocument();
     expect(screen.queryByText(/requested by/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Not recorded: this analysis was made before requests were kept/)).toBeInTheDocument();
   });
 
   it("shows why a request was refused", async () => {

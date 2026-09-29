@@ -18,6 +18,7 @@ from .config import Settings
 
 TIMEOUT = 300.0  # seconds per attempt; photos plus a long structured answer take a while
 MAX_TOKENS = 32000  # thinking and the answer; streamed, so no HTTP timeout at this size
+EFFORT = "high"  # thinking is adaptive (not set: the default of the offered models)
 
 
 
@@ -56,16 +57,18 @@ class Reply:
     raw: str  # the answer as returned
     request_id: str | None
     usage: dict[str, Any] = field(default_factory=dict)  # model, tokens in and out, cost_usd
+    request: dict[str, Any] = field(default_factory=dict)  # what was sent, photos by size
 
 
 class AIError(Exception):
-    """The provider gave no usable answer; `raw` keeps whatever it returned, for debugging, and
-    `usage` what an answer that came back but could not be used cost."""
+    """The provider gave no usable answer; `raw` keeps whatever it returned, for debugging,
+    `usage` what an answer that came back but could not be used cost, and `request` what was
+    sent."""
 
     def __init__(self, message: str, raw: str | None = None, request_id: str | None = None,
-                 usage: dict[str, Any] | None = None):
+                 usage: dict[str, Any] | None = None, request: dict[str, Any] | None = None):
         super().__init__(message)
-        self.raw, self.request_id, self.usage = raw, request_id, usage
+        self.raw, self.request_id, self.usage, self.request = raw, request_id, usage, request
 
 
 # A request's content, in order: text, or a JPEG photo as bytes.
@@ -75,31 +78,37 @@ Client = Callable[[Settings, str, list[Part], dict[str, Any]], Reply]
 
 def ask_anthropic(settings: Settings, system: str, parts: list[Part],
                   schema: dict[str, Any]) -> Reply:
+    params = {
+        "model": settings.ai_model, "max_tokens": MAX_TOKENS, "system": system,
+        "output_config": {"effort": EFFORT,
+                          "format": {"type": "json_schema",
+                                     "schema": anthropic.transform_schema(schema)}},
+        # A request a safety classifier declines is re-run on the model Anthropic recommends
+        # for that case instead of failing.
+        "betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default",
+    }
     content = [
         {"type": "text", "text": p} if isinstance(p, str) else
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                      "data": base64.standard_b64encode(p).decode()}}
         for p in parts
     ]
+    sent = {**params, "timeout_seconds": TIMEOUT, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": p} if isinstance(p, str) else
+        {"type": "image", "media_type": "image/jpeg", "bytes": len(p)} for p in parts]}]}
     try:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key or None, timeout=TIMEOUT)
         with client.beta.messages.stream(
-            model=settings.ai_model, max_tokens=MAX_TOKENS, system=system,
-            messages=[{"role": "user", "content": content}],
-            output_config={"effort": "high",
-                           "format": {"type": "json_schema",
-                                      "schema": anthropic.transform_schema(schema)}},
-            # A request a safety classifier declines is re-run on the model Anthropic
-            # recommends for that case instead of failing.
-            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+            **params, messages=[{"role": "user", "content": content}],
         ) as stream:
             message = stream.get_final_message()
             request_id = stream.request_id  # a streamed message does not carry it
     except anthropic.APIStatusError as exc:
         raise AIError(f"the AI provider rejected the request ({exc.status_code}): {exc.message}",
-                      request_id=exc.request_id) from exc
+                      request_id=exc.request_id, request=sent) from exc
     except anthropic.AnthropicError as exc:  # timeout, connection, missing API key
-        raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}") from exc
+        raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}",
+                      request=sent) from exc
     tokens_in, tokens_out = message.usage.input_tokens, message.usage.output_tokens
     # ponytail: priced at the answering model's rate; after a server-side fallback the declined
     # attempt (usage.iterations) is not counted. Sum the iterations if fallbacks become common.
@@ -109,14 +118,15 @@ def ask_anthropic(settings: Settings, system: str, parts: list[Part],
     if message.stop_reason == "refusal":
         category = message.stop_details.category if message.stop_details else None
         raise AIError(f"the model declined the request ({category or 'no category'})",
-                      raw, request_id, usage)
+                      raw, request_id, usage, sent)
     if message.stop_reason == "max_tokens":
-        raise AIError("the answer was cut off at the token limit", raw, request_id, usage)
+        raise AIError("the answer was cut off at the token limit", raw, request_id, usage, sent)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise AIError(f"the answer is not valid JSON: {exc}", raw, request_id, usage) from exc
-    return Reply(data, raw, request_id, usage)
+        raise AIError(f"the answer is not valid JSON: {exc}", raw, request_id, usage,
+                      sent) from exc
+    return Reply(data, raw, request_id, usage, sent)
 
 
 CLIENTS: dict[str, Client] = {"anthropic": ask_anthropic}

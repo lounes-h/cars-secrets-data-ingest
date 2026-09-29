@@ -51,7 +51,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
 | `alerts` | Alerts; at most one unresolved row per `fingerprint` |
 | `worker_heartbeat` | Liveness of the worker |
-| `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, tokens and cost of each model call (`usage`), error, timestamps |
+| `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, tokens and cost of each model call (`usage`), the exact request (`request`: settings, and per call the parameters, prompts and message), error, timestamps |
 
 ### Why the schema survives CSV changes
 
@@ -321,6 +321,10 @@ the auction site, where dealers go to bid.
 
 ## AI damage analysis
 
+It lives in this repository, not in the customer-facing API and web apps, to find the prompt
+and the model that give the best analyses for their cost. Each analysis therefore keeps what
+shaped it: its `request` (below), its tokens and cost (`usage`), and its result or failure.
+
 A person asks for it from the lot page: "Generate AI Analysis" opens a dialog that offers the
 models of `ai.MODELS` (`GET /api/analysis-models`: name, note, price per million tokens, with
 `AI_MODEL` preselected). `POST /api/lots/{source}/{lot_number}/analyses` with the chosen
@@ -359,6 +363,13 @@ Regenerating inserts a new row; nothing is overwritten. `GET .../analyses` retur
 completed analysis (shown) and the latest request of any status (progress, or a failure after
 it), so a failed regeneration never hides the previous analysis. The page draws each region
 over the original photo from its normalized box.
+
+`request` keeps the analysis's settings (provider, model, prompt and schema versions, language,
+photo limits and sizes, selection thresholds) and, per model call (`selection`, `analysis`),
+exactly what was sent: the parameters (model, `max_tokens`, effort, betas, fallbacks, timeout),
+the system prompt, the user message (the metadata text, each photo's ID and its size in bytes,
+not the photo itself) and the output schema. A call that failed keeps its request too. The lot
+page shows all of it under "Prompt and Request". Analyses made before migration 0012 have none.
 
 `usage` keeps, per model call (`selection`, `analysis`), the answering model, input and output
 tokens (photos count as input, thinking as output) and `cost_usd`. The cost is computed when

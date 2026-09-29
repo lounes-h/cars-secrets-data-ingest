@@ -132,8 +132,11 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
   only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
   `cs.copart.com` for images, which the CSP `img-src` allows). Browsers load images directly.
-- **AI damage analysis** (`vehicle_analysis.py`, `ai.py`, see `docs/architecture.md`): only a
-  person triggers it, from the lot page; never analyze lots automatically (each run spends API
+- **AI damage analysis** (`vehicle_analysis.py`, `ai.py`, see `docs/architecture.md`): it is
+  here, not in the customer-facing API and web, to find the prompt and model with the best
+  quality for the cost, so every analysis keeps its exact request (settings, and per model call
+  the parameters, prompts and message sent; `request`), its tokens and cost (`usage`) and its
+  outcome, and the lot page shows them. Only a person triggers it, from the lot page; never analyze lots automatically (each run spends API
   credit). The API queues a `vehicle_analyses` row (one queued/running per lot, partial unique
   index) with the model chosen in the page's dialog, one of `ai.MODELS` (default `AI_MODEL`;
   the API refuses others); the worker runs it with that model, stamped with `AI_PROVIDER`/

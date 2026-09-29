@@ -242,6 +242,27 @@ export interface AIUsage {
   cost_usd?: number | null;
 }
 
+/** One block of a message as sent to the model; photos are recorded by their size. */
+export type SentContent =
+  | { type: "text"; text: string }
+  | { type: "image"; media_type: string; bytes: number };
+
+/** A model call's request as sent: parameters, system prompt, message, output schema. */
+export interface SentRequest {
+  model: string;
+  system: string;
+  output_config: { format: { type: string; schema: unknown }; [key: string]: unknown };
+  messages: { role: string; content: SentContent[] }[];
+  [key: string]: unknown;
+}
+
+/** What shaped an analysis: its settings, and each model call's request. */
+export interface AnalysisRequestRecord {
+  settings: Record<string, string | number>;
+  selection?: SentRequest;
+  analysis?: SentRequest;
+}
+
 export interface VehicleAnalysis {
   id: number;
   source: string;
@@ -258,6 +279,8 @@ export interface VehicleAnalysis {
   result: AnalysisResult | null;
   /** Per model call: choosing the photos (only for lots with many), then the analysis. */
   usage: { selection?: AIUsage | null; analysis?: AIUsage | null } | null;
+  /** Null for analyses made before requests were recorded. */
+  request: AnalysisRequestRecord | null;
   error: string | null;
   created_at: string;
   started_at: string | null;

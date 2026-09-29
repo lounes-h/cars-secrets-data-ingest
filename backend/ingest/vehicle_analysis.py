@@ -430,15 +430,18 @@ class AnalysisError(Exception):
 
 def ask(settings: Settings, record: dict[str, Any], step: str, system: str,
         parts: list[ai.Part], schema: dict[str, Any]) -> ai.Reply:
-    """`ai.ask`, keeping the tokens and cost of the call under `usage[step]`, also when the
-    answer that came back cannot be used (it is billed all the same)."""
+    """`ai.ask`, keeping what the call sent under `request[step]` and its tokens and cost under
+    `usage[step]`, also when it fails (an answer that came back unusable is billed all the
+    same)."""
     try:
         reply = ai.ask(settings, system, parts, schema)
     except ai.AIError as exc:
+        if exc.request:
+            record["request"][step] = exc.request
         if exc.usage:
             record["usage"][step] = exc.usage
         raise
-    record["usage"][step] = reply.usage
+    record["request"][step], record["usage"][step] = reply.request, reply.usage
     return reply
 
 
@@ -479,6 +482,14 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
                        (analysis["source"], analysis["lot_number"])).fetchone()
     record["input_snapshot"] = snapshot = metadata(lot)
     record["usage"] = {}
+    # Everything that shapes the analysis besides the lot, to compare prompts and models later.
+    record["request"] = {"settings": {
+        "provider": settings.ai_provider, "model": settings.ai_model,
+        "prompt_version": analysis["prompt_version"],
+        "schema_version": analysis["schema_version"], "language": analysis["language"],
+        "max_images": settings.ai_max_images, "image_max_px": settings.ai_image_max_px,
+        "selection_px": SELECTION_PX, "damage_relevance": DAMAGE_RELEVANCE,
+        "min_damage_photos": MIN_DAMAGE_PHOTOS, "max_overview_photos": MAX_OVERVIEW_PHOTOS}}
     provider = PROVIDERS.get(analysis["source"])
     listing = provider.fetch_images(lot) if provider and provider.fetch_images else None
     images = listing.images if listing else []
@@ -516,8 +527,8 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
 
 # The columns an analysis's outcome fills (JSON ones apart).
 OUTCOME = ("status", "input_snapshot", "images", "image_count", "selection", "result",
-           "raw_response", "provider_request_id", "usage", "error")
-OUTCOME_JSON = ("input_snapshot", "images", "selection", "result", "usage")
+           "raw_response", "provider_request_id", "usage", "request", "error")
+OUTCOME_JSON = ("input_snapshot", "images", "selection", "result", "usage", "request")
 
 
 def run(conn: Connection, settings: Settings, analysis: dict[str, Any]) -> dict[str, Any]:
