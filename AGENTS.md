@@ -279,7 +279,9 @@ A code change is not considered complete until the relevant unit tests have been
   list by make, model (prefix), year, primary damage, state, yard, sale date, keys, runs/drives
   and odometer, and shows how many lots match (`GET /api/lots` takes them as query parameters,
   `LOT_FILTERS` in `api/app.py`; `GET /api/lot-filters` lists the values of the active lots,
-  cached 15 min). Filters are not kept when leaving the page. One provider: Copart.
+  cached 15 min). Filters are not kept when leaving the page. Each dashboard user can
+  mark lots as favorites (☆ in the list and on the lot page, `lot_favorites`) and list only
+  those (★ Favorites, `favorites=true`). One provider: Copart.
 - Measured: 142k-row export (89 MB) ingests in ~12 s first time; a 24k-row export in ~3.5 s.
 - Real exports differ in size: 2026-09-15 had 142k rows / 224 yards, 2026-09-17 had 24.5k
   rows / 44 yards. That is why removals are scoped per yard and the row-count warning fires

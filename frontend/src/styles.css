@@ -277,3 +277,9 @@ pre { background: var(--surface-2); padding: 8px 10px; border-radius: 8px; overf
   width: 100%; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--ink);
 }
 .match-count { margin-left: auto; }
+
+/* Favorites */
+.favorite.icon-only { border: none; background: none; padding: 2px 6px; font-size: 18px; line-height: 1; color: var(--muted); }
+.favorite.on { color: #d99a00; }
+.favorite.on:not(.icon-only) { color: var(--ink); }
+.favorite.on:not(.icon-only) span { color: #d99a00; }

@@ -32,6 +32,9 @@ LOT_COLUMNS = """source, lot_number, year, make, model_group, model_detail, trim
     damage_primary, damage_secondary, odometer, est_retail_value, repair_cost, high_bid,
     buy_it_now_price, currency, sale_status, sale_at, yard_code, yard_name, location_city,
     location_state, thumbnail_url, first_seen_at, last_seen_at, last_changed_at, removed_at"""
+# Whether the signed-in user (%(user)s) marked the lot as favorite.
+IS_FAVORITE = """EXISTS (SELECT 1 FROM lot_favorites f WHERE f.username = %(user)s
+    AND f.source = lots.source AND f.lot_number = lots.lot_number) AS favorite"""
 
 
 # Lots page filters: query parameter -> condition on `lots`. Makes and yards are matched
@@ -60,6 +63,7 @@ class LotQuery(BaseModel):
     state: Literal["active", "removed", "all"] = "all"
     limit: int = Field(50, ge=1, le=200)
     offset: int = Field(0, ge=0)
+    favorites: bool = False  # only the signed-in user's favorites
     make: str | None = None
     model: str | None = None
     year_min: int | None = None
@@ -506,10 +510,13 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
 
     # --- lots ------------------------------------------------------------------------------------
     @api.get("/lots")
-    def lots(conn: Conn, query: Annotated[LotQuery, Query()]) -> dict[str, Any]:
+    def lots(conn: Conn, user: User, query: Annotated[LotQuery, Query()]) -> dict[str, Any]:
         """One page of lots, most recently changed first, and how many match in all."""
         q, source, state = query.q, query.source, query.state
         where = ["(%(source)s::text IS NULL OR source = %(source)s)"]
+        if query.favorites:  # only the lots the user marked
+            where.append("""(source, lot_number) IN (SELECT source, lot_number
+                             FROM lot_favorites WHERE username = %(user)s)""")
         if state == "active":
             where.append("removed_at IS NULL")
         elif state == "removed":
@@ -526,9 +533,9 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         where += [LOT_FILTERS[k] for k in given]
         clause = " AND ".join(where)
         params = {"source": source, "q": q, "prefix": like_prefix(q),
-                  "limit": query.limit, "offset": query.offset, **given}
+                  "limit": query.limit, "offset": query.offset, "user": user, **given}
         items = conn.execute(
-            f"""SELECT {LOT_COLUMNS} FROM lots WHERE {clause}
+            f"""SELECT {LOT_COLUMNS}, {IS_FAVORITE} FROM lots WHERE {clause}
                 ORDER BY last_changed_at DESC LIMIT %(limit)s OFFSET %(offset)s""", params,
         ).fetchall()
         total = conn.execute(f"SELECT count(*) AS n FROM lots WHERE {clause}", params).fetchone()
@@ -558,10 +565,11 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         return options
 
     @api.get("/lots/{source}/{lot_number}")
-    def lot_detail(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
+    def lot_detail(source: str, lot_number: str, conn: Conn, user: User) -> dict[str, Any]:
         lot = conn.execute(
-            f"SELECT {LOT_COLUMNS}, attributes, first_file_id, last_file_id FROM lots "
-            "WHERE source = %s AND lot_number = %s", (source, lot_number),
+            f"""SELECT {LOT_COLUMNS}, {IS_FAVORITE}, attributes, first_file_id, last_file_id
+                FROM lots WHERE source = %(source)s AND lot_number = %(lot_number)s""",
+            {"source": source, "lot_number": lot_number, "user": user},
         ).fetchone()
         if lot is None:
             raise HTTPException(404, "lot not found")
@@ -581,6 +589,22 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         lot["listing_url"] = (provider.listing_url(lot_number)
                               if provider and provider.listing_url else None)
         return {"lot": lot, "history": history}
+
+    @api.put("/lots/{source}/{lot_number}/favorite", status_code=204)
+    def add_favorite(source: str, lot_number: str, conn: Conn, user: User) -> None:
+        """Mark the lot as a favorite of the signed-in user (again: no change)."""
+        try:
+            conn.execute(
+                """INSERT INTO lot_favorites (username, source, lot_number) VALUES (%s, %s, %s)
+                   ON CONFLICT DO NOTHING""", (user, source, lot_number))
+        except psycopg.errors.ForeignKeyViolation:
+            raise HTTPException(404, "lot not found") from None
+
+    @api.delete("/lots/{source}/{lot_number}/favorite", status_code=204)
+    def remove_favorite(source: str, lot_number: str, conn: Conn, user: User) -> None:
+        conn.execute(
+            "DELETE FROM lot_favorites WHERE username = %s AND source = %s AND lot_number = %s",
+            (user, source, lot_number))
 
     @api.get("/lots/{source}/{lot_number}/images")
     def lot_images(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
