@@ -68,6 +68,7 @@ describe("lot detail", () => {
   it("links back to the lots list, even while loading", () => {
     vi.spyOn(api, "lot").mockReturnValue(new Promise(() => {}));
     vi.spyOn(api, "lotImages").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(api, "lotAnalyses").mockReturnValue(new Promise(() => {}));
     render(
       <QueryClientProvider client={new QueryClient()}>
         <MemoryRouter initialEntries={["/lots/copart/68264956"]}>
@@ -149,6 +150,7 @@ describe("lot detail page", () => {
   function open(data: LotDetail, images = { images: [], complete: true }) {
     vi.spyOn(api, "lot").mockResolvedValue(data);
     vi.spyOn(api, "lotImages").mockResolvedValue(images);
+    vi.spyOn(api, "lotAnalyses").mockResolvedValue({ latest: null, current: null });
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter initialEntries={["/lots/copart/68264956"]}>
@@ -167,6 +169,8 @@ describe("lot detail page", () => {
     expect(screen.getAllByText(/∅/)).toHaveLength(2);
     expect(screen.getByText("All 2 source values")).toBeInTheDocument();
     expect(await screen.findByText("No photos for this lot.")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Generate AI Analysis" })).toBeEnabled();
+    expect(screen.getByRole("heading", { name: "AI Analysis" })).toBeInTheDocument();
   });
 
   it("marks a removed lot and names another auction as it is", async () => {

@@ -3,7 +3,8 @@
 Filesystem events give low latency; a periodic rescan catches anything the events missed
 (Docker bind mounts on macOS, files present at startup, a restart mid-download). After each
 ingested file, and on a timer, lots are priced (pricing.py) and the API's database is brought
-up to date (api_sync.py)."""
+up to date (api_sync.py). AI damage analyses requested from the dashboard run one at a time
+(vehicle_analysis.py)."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import structlog
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import api_sync, files, pricing
+from . import api_sync, files, pricing, vehicle_analysis
 from .alerts import AlertSpec, raise_alert, resolve_fingerprint
 from .config import Settings, get_settings
 from .db import connect
@@ -212,6 +213,26 @@ class Worker:
         if priced:
             log.info("pricing.done", lots=priced)
 
+    def analysis_loop(self) -> None:
+        """Run requested AI analyses, oldest first; each takes a minute or two."""
+        conn = None
+        while not self.stop.is_set():
+            try:
+                if conn is None or conn.closed:
+                    conn = connect(self.settings.database_url)
+                if vehicle_analysis.process_next(conn, self.settings):
+                    continue
+            except psycopg.Error:  # retried on the next round; the request stays queued
+                log.exception("analysis.db_unavailable")
+                if conn is not None:
+                    conn.close()
+                conn = None
+            except Exception:  # noqa: BLE001
+                log.exception("analysis.crashed")
+            self.stop.wait(self.settings.analysis_poll_seconds)
+        if conn is not None:
+            conn.close()
+
     def rescan_loop(self) -> None:
         while not self.stop.wait(self.settings.inbox_rescan_seconds):
             try:
@@ -229,6 +250,7 @@ class Worker:
 
         with connect(s.database_url) as conn:
             interrupted = mark_interrupted(conn)
+            vehicle_analysis.fail_interrupted(conn)
             conn.execute(
                 """DELETE FROM worker_heartbeat
                    WHERE last_beat_at < now() - make_interval(secs => %s)""",
@@ -250,7 +272,8 @@ class Worker:
         observer.schedule(Handler(), str(s.inbox_dir), recursive=True)
         observer.start()
         threads = [threading.Thread(target=t, daemon=True, name=t.__name__)
-                   for t in (self.heartbeat_loop, self.rescan_loop, self.sync_loop)]
+                   for t in (self.heartbeat_loop, self.rescan_loop, self.sync_loop,
+                             self.analysis_loop)]
         for t in threads:
             t.start()
         self.rescan()  # files that arrived while the worker was down

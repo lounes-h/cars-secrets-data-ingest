@@ -280,3 +280,29 @@ def test_sync_loop_runs_at_start_on_request_and_on_its_timer(settings, monkeypat
         len(calls) == 3 and worker.stop.set()))
     worker.sync_loop()  # nothing requested: the timer alone drives it
     assert len(calls) == 3
+
+
+def test_analysis_loop_runs_requests_and_survives_errors(settings, monkeypatch):
+    settings.analysis_poll_seconds = 0.01
+    worker = Worker(settings)
+    conns = []
+    outcomes = [True, True, psycopg.OperationalError("gone"), RuntimeError("bug"), False]
+
+    def process_next(conn, _settings):
+        outcome = outcomes.pop(0)
+        if not outcomes:
+            worker.stop.set()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def connect(_url):
+        conns.append(FakeConn())
+        return conns[-1]
+
+    monkeypatch.setattr(worker_module, "connect", connect)
+    monkeypatch.setattr(worker_module.vehicle_analysis, "process_next", process_next)
+    worker.analysis_loop()
+    assert outcomes == []
+    # reconnected after the database error; the last connection is closed on stop
+    assert len(conns) == 2 and all(c.closed for c in conns)

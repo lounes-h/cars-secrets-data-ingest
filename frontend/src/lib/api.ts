@@ -169,6 +169,98 @@ export interface LotImage {
   hd: string | null;
 }
 
+/** AI condition and damage analysis of a lot (schema 1.0), run by the worker on request. */
+export type AnalysisStatus = "queued" | "processing" | "completed" | "failed";
+export type DamageSeverity = "minor" | "moderate" | "severe" | "unknown";
+
+export interface ObservedDamage {
+  damage_id: string;
+  part_name: string;
+  location: string;
+  severity: DamageSeverity;
+  description: string;
+  confidence: number;
+  evidence_image_ids: string[];
+}
+
+export interface PossibleHiddenDamage {
+  damage_id: string;
+  part_name: string;
+  description: string;
+  reason: string;
+  based_on_observed_damage_ids: string[];
+  confidence: number;
+  inspection_recommended: boolean;
+}
+
+export interface DamagedPart {
+  part_name: string;
+  severity: DamageSeverity;
+  suggested_action: "inspect" | "repair" | "replace" | "repair_or_replace" | "unknown";
+  confidence: number;
+  observed_damage_ids: string[];
+}
+
+export interface DamageRegion {
+  region_id: string;
+  damage_id: string;
+  part_name: string;
+  label: string;
+  explanation: string;
+  confidence: number;
+  /** Fractions of the photo's width and height, from its top-left corner. */
+  bounding_box: { x: number; y: number; width: number; height: number };
+}
+
+export interface AnalysisResult {
+  schema_version: string;
+  language: string;
+  general_summary: { summary: string; key_findings: string[]; inspection_priorities: string[] };
+  damage_analysis: {
+    summary: string;
+    observed_damage: ObservedDamage[];
+    possible_hidden_damage: PossibleHiddenDamage[];
+  };
+  damaged_parts: DamagedPart[];
+  image_annotations: { image_id: string; regions: DamageRegion[] }[];
+  limitations: string[];
+}
+
+/** A photo sent to the model: `image_id` is how the analysis refers to it. */
+export interface AnalysisImage extends LotImage {
+  image_id: string;
+  /** 1-based position in the lot's photo list. */
+  position: number;
+}
+
+export interface VehicleAnalysis {
+  id: number;
+  source: string;
+  lot_number: string;
+  status: AnalysisStatus;
+  language: string;
+  requested_by: string | null;
+  provider: string | null;
+  model: string | null;
+  prompt_version: string | null;
+  schema_version: string | null;
+  images: AnalysisImage[] | null;
+  image_count: number | null;
+  result: AnalysisResult | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+export interface LotAnalyses {
+  /** The latest completed analysis, shown on the lot page. */
+  latest: VehicleAnalysis | null;
+  /** The latest request, whatever its status: in progress, or failed after `latest`. */
+  current: VehicleAnalysis | null;
+}
+
 export type DownloaderStatus =
   | "not_installed" | "paused" | "not_running" | "downloading" | "requested" | "scheduled";
 
@@ -250,6 +342,12 @@ export const api = {
   lotImages: (source: string, lotNumber: string) =>
     request<{ images: LotImage[]; complete: boolean }>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/images`),
+  lotAnalyses: (source: string, lotNumber: string) =>
+    request<LotAnalyses>(
+      "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`),
+  requestAnalysis: (source: string, lotNumber: string) =>
+    request<VehicleAnalysis>(
+      "POST", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`, {}),
 };
 
 export { withParams };

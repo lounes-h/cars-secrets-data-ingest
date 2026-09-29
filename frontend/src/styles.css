@@ -266,3 +266,21 @@ pre { background: var(--surface-2); padding: 8px 10px; border-radius: 8px; overf
 .banner-lines { display: grid; gap: 2px; }
 .status-line { display: flex; gap: 6px; align-items: center; }
 .plain-link { color: inherit; }
+
+/* AI analysis (lot page) */
+.analysis h3 { font-size: 14px; margin: 20px 0 6px; font-weight: 600; }
+.analysis h4 { font-size: 13px; margin: 14px 0 6px; font-weight: 600; color: var(--ink-2); }
+.analysis p { margin: 0 0 8px; }
+.analysis ul { margin: 0 0 8px; padding-left: 20px; }
+.damage-photos { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); }
+.damage-photo { margin: 0; display: grid; gap: 6px; align-content: start; }
+/* The frame takes the photo's exact size, so the boxes' percentages land on the photo. */
+.damage-frame { position: relative; line-height: 0; border-radius: 8px; overflow: hidden; background: var(--surface-2); }
+.damage-frame img { width: 100%; height: auto; display: block; }
+.damage-box {
+  position: absolute; padding: 0; border: 2px solid var(--critical); border-radius: 4px;
+  background: rgba(208, 59, 59, 0.12); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+.damage-box:hover:not(:disabled), .damage-box[aria-pressed="true"] { background: rgba(208, 59, 59, 0.28); border-width: 3px; }
+.region-details { display: grid; gap: 2px; }
+.raw-json { max-height: 420px; overflow: auto; }

@@ -23,7 +23,7 @@ downloader ──► data/inbox/<provider>/*.csv
 
 | Module (`backend/ingest/`) | Responsibility |
 |---|---|
-| `worker.py` | Watches the inbox, queues complete files, processes them one at a time, heartbeats, purges the archive |
+| `worker.py` | Watches the inbox, queues complete files, processes them one at a time, heartbeats, purges the archive, runs requested AI analyses |
 | `files.py` | Candidate filtering, provider routing by folder, completeness check, hashing, archive/move |
 | `pipeline.py` | One file end to end: register, duplicate check, load, alerts, archive or fail |
 | `parsing.py` | Streaming CSV parser: header normalization, row validation, typed conversion, row hash |
@@ -32,6 +32,8 @@ downloader ──► data/inbox/<provider>/*.csv
 | `pricing.py` | Final price model: one vocabulary for Copart and IAA, the cleaned training and test files of real sale prices, XGBoost training, pricing the active lots |
 | `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
 | `apiauctions_import.py`, `apiauctions_codes.json` | Real sale prices from apiauctions into `lots` (`final_price`), and the translations of its wording into our Copart codes |
+| `vehicle_analysis.py` | AI condition and damage analysis of a lot: photo selection and resizing, the versioned prompt, the answer's schema and its validation, the queue the worker runs |
+| `ai.py` | AI model clients behind one call (`ask`): text and photos in, schema-valid JSON out; Anthropic's is the only one |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -49,6 +51,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `rejected_rows` | Up to 1,000 unusable rows per file with the reason |
 | `alerts` | Alerts; at most one unresolved row per `fingerprint` |
 | `worker_heartbeat` | Liveness of the worker |
+| `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, token usage, error, timestamps |
 
 ### Why the schema survives CSV changes
 
@@ -315,6 +318,51 @@ The endpoint `GET /api/lots/{source}/{lot_number}/images` returns `{images, comp
 for 15 minutes. Browsers load the photos straight from `cs.copart.com`. Each lot also carries
 `listing_url` (`Provider.listing_url`, Copart: `https://www.copart.com/lot/<n>`): its page on
 the auction site, where dealers go to bid.
+
+## AI damage analysis
+
+A person asks for it from the lot page ("Generate AI Analysis"). `POST
+/api/lots/{source}/{lot_number}/analyses` inserts a `queued` row in `vehicle_analyses`; a
+partial unique index allows one queued or running analysis per lot, so a second click gets a
+409. The worker's analysis thread claims the oldest queued row every `ANALYSIS_POLL_SECONDS`
+(3 s), stamps it with `AI_PROVIDER`, `AI_MODEL`, `AI_PROMPT_VERSION` and `AI_SCHEMA_VERSION`, and
+runs it (`vehicle_analysis.run`), one at a time:
+
+1. **Photos.** The provider's `fetch_images` lists the lot's photos; each is downloaded in its
+   largest size (HD, else full, else thumbnail) and re-encoded as a JPEG whose longest side is
+   at most `AI_IMAGE_MAX_PX` (1024; aspect ratio kept, never enlarged). This copy exists only
+   for the model: the dashboard keeps showing the auction's own photos.
+2. **Selection.** When the lot has more photos than `AI_MAX_IMAGES` (5), the model first sees
+   all of them as 384 px copies (`photo_01` …) and rates each: view, damage visible, relevance
+   to the reported damage, near-duplicate of another. `choose` keeps the most relevant damage
+   photos, never two near-duplicates and never weak ones just to reach the maximum; with fewer
+   than two damage photos it adds up to two exterior overviews; if nothing qualifies, the first
+   photos. Otherwise every photo is sent.
+3. **Analysis.** The chosen photos, renamed `image_01` … in listing order, go to the model with
+   the lot's metadata (`vehicle_analysis.METADATA` and condition notes of the export) and the
+   prompt `vehicle-damage-v1`. The answer is constrained to the schema (structured outputs)
+   and then validated with pydantic (`AnalysisV1`): allowed severities, locations and actions,
+   confidences and bounding boxes within 0–1 and boxes inside the photo, unique IDs, and
+   every reference pointing at a supplied photo or at observed damage. A region may only mark
+   observed damage, on a photo that damage cites; possible hidden damage cites the observed
+   damage it is inferred from and never gets a box.
+4. **Outcome.** A valid answer is stored as `completed` (`result`). Anything else (no usable
+   photo, a provider error or timeout, a refusal, truncated or non-JSON output, a failed
+   validation) is stored as `failed` with the error, the raw answer and the provider's request
+   id; what was sent is kept either way. A worker that stops mid-analysis marks it failed on
+   restart. Each change of status is a `pg_notify` event (`analysis`) that refreshes the page.
+
+Regenerating inserts a new row; nothing is overwritten. `GET .../analyses` returns the latest
+completed analysis (shown) and the latest request of any status (progress, or a failure after
+it), so a failed regeneration never hides the previous analysis. The page draws each region
+over the original photo from its normalized box.
+
+The Anthropic client uses `claude-opus-5-5` at high effort, streams the answer (up to 32k
+tokens, 300 s timeout) and opts into server-side fallback, which re-runs a request a safety
+classifier declines on the model Anthropic recommends. Another provider is a function in
+`ai.CLIENTS` with the same signature; a new prompt or schema is a new entry in
+`vehicle_analysis.PROMPTS` or `SCHEMAS`, selected by its version. English is the only output
+language (`LANGUAGES`); a request may name one, and the row keeps it.
 
 ## Adding a provider
 

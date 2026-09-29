@@ -8,7 +8,8 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 ## Tech stack
 
 - **Backend** (`backend/`): Python 3.12, psycopg 3 (`COPY` for bulk loads), FastAPI + uvicorn,
-  watchdog (file events), pydantic-settings, Alembic, structlog. Package: `ingest`.
+  watchdog (file events), pydantic-settings, Alembic, structlog, Anthropic SDK + Pillow (AI
+  damage analysis). Package: `ingest`.
 - **Database**: PostgreSQL 17, twice: the ingest database (source of truth, full history) and
   the API's database (`cars-secrets-api`), which the worker keeps in step.
 - **Frontend** (`frontend/`): React 19 + TypeScript, Vite, TanStack Query, React Router,
@@ -131,6 +132,18 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `/api/lots/{source}/{lot}/images`, cached 15 min). It only uses URLs stored for the lot and
   only contacts/returns allow-listed hosts (Copart: `inventoryv2.copart.io` for the list,
   `cs.copart.com` for images, which the CSP `img-src` allows). Browsers load images directly.
+- **AI damage analysis** (`vehicle_analysis.py`, `ai.py`, see `docs/architecture.md`): only a
+  person triggers it, from the lot page; never analyze lots automatically (each run spends API
+  credit). The API queues a `vehicle_analyses` row (one queued/running per lot, partial unique
+  index); the worker runs it, stamped with `AI_PROVIDER`/`AI_MODEL`/`AI_PROMPT_VERSION`/
+  `AI_SCHEMA_VERSION`, and keeps what it sent and got back, success or not. Regenerating adds
+  a row, never overwrites one. At most `AI_MAX_IMAGES` (5) photos go to the model, shrunk to
+  `AI_IMAGE_MAX_PX` (1024), renamed `image_01` …; with more photos than that, the model first
+  picks them from 384 px copies. An answer is `completed` only if it passes `AnalysisV1`
+  (schema and every cross-reference: regions mark observed damage on a photo it cites; hidden
+  damage has no box). Changing the prompt or the answer's shape = a new entry in `PROMPTS` or
+  `SCHEMAS` under a new version, never an edit of a released one. Another model provider = a
+  function in `ai.CLIENTS`. No costs, values or bids in the analysis.
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API
@@ -180,6 +193,9 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `sslmode=require` for a hosted database.
 - The downloader's Chrome profile (`~/.cars-ingest/copart-profile`, mode 700) holds the Copart
   session cookie: keep it out of the repo and never copy it elsewhere.
+- `ANTHROPIC_API_KEY` lives in `.env` only and is passed to the worker, the only process that
+  calls the model. The model's answer is untrusted data: validate it before storing it, render
+  it as text.
 
 ## Migrations
 
@@ -300,6 +316,10 @@ A code change is not considered complete until the relevant unit tests have been
   $752, half the lots within 31 % of their price, R² 0.73, against $2,099 / 0.47 for the
   synthetic model it replaced (kept as `data/models/final_price-synthetic.ubj`). IAA sales
   neither help nor hurt Copart prices (Copart only: MAE $1,577).
+- AI damage analysis built (2026-09-28): "Generate AI Analysis" on the lot page, Claude Opus
+  5.5, prompt `vehicle-damage-v1`, schema 1.0, English. Tested against a fake model only: it
+  needs `ANTHROPIC_API_KEY` in `.env`, and its accuracy on real lots is not measured yet. It
+  sends Copart photos to Anthropic, which the Copart license question above also covers.
 - Not done yet: external alert channels, a second provider (IAA sales are stored, not its
   live lots).
 

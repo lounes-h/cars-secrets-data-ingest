@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 export interface PipelineEvent {
   type: "run_started" | "run_finished" | "alert" | "alert_resolved" | "alert_updated" | "downloader"
-    | "lots_imported";
+    | "lots_imported" | "analysis";
   [key: string]: unknown;
 }
 
@@ -18,6 +18,8 @@ export function queriesFor(event: PipelineEvent): string[][] {
       return [["downloader"], ["overview"]];
     case "lots_imported":  // sale prices loaded from apiauctions (apiauctions_import.py)
       return [["overview"], ["lots"], ["lot"]];
+    case "analysis":  // an AI damage analysis was requested, started or finished
+      return [["lot-analysis"]];
     case "alert":
     case "alert_resolved":
     case "alert_updated":
