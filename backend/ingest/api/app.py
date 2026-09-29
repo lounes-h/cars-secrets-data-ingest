@@ -19,7 +19,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from .. import vehicle_analysis
+from .. import ai, vehicle_analysis
 from ..config import Settings, get_settings
 from ..db import EVENTS_CHANNEL, notify
 from ..log_config import configure_logging
@@ -556,8 +556,15 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
                 ORDER BY id DESC LIMIT 1""", key).fetchone()
         return {"latest": latest, "current": current}
 
+    @api.get("/analysis-models")
+    def analysis_models() -> dict[str, Any]:
+        """The models an analysis may use, with their prices, and the default (AI_MODEL)."""
+        return {"default": settings.ai_model,
+                "models": [{"id": k, **asdict(m)} for k, m in ai.MODELS.items()]}
+
     class AnalysisRequest(BaseModel):
         language: str | None = None  # default: AI_LANGUAGE
+        model: str | None = None  # default: AI_MODEL; one of ai.MODELS
 
     @api.post("/lots/{source}/{lot_number}/analyses", status_code=202)
     def request_analysis(source: str, lot_number: str, conn: Conn, user: User,
@@ -566,12 +573,16 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         language = (body.language if body else None) or settings.ai_language
         if language not in vehicle_analysis.LANGUAGES:
             raise HTTPException(422, f"unsupported language {language!r}")
+        model = (body.model if body else None) or settings.ai_model
+        if model not in ai.MODELS:  # a client never picks an unlisted (unpriced) model
+            raise HTTPException(422, f"unsupported model {model!r}")
         lot_exists(conn, source, lot_number)
         try:
             row = conn.execute(
-                f"""INSERT INTO vehicle_analyses (source, lot_number, language, requested_by)
-                    VALUES (%s, %s, %s, %s) RETURNING {ANALYSIS_COLUMNS}""",
-                (source, lot_number, language, user)).fetchone()
+                f"""INSERT INTO vehicle_analyses (source, lot_number, language, model,
+                                                  requested_by)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING {ANALYSIS_COLUMNS}""",
+                (source, lot_number, language, model, user)).fetchone()
         except psycopg.errors.UniqueViolation:
             raise HTTPException(409, "an analysis of this lot is already in progress") from None
         notify(conn, "analysis", id=row["id"], source=source, lot_number=lot_number,

@@ -438,6 +438,30 @@ def test_request_run_and_regenerate_through_the_api(authed, conn, settings, lot,
     assert conn.execute("SELECT count(*) AS n FROM vehicle_analyses").fetchone()["n"] == 2
 
 
+def test_the_model_chosen_for_a_request_runs_it(authed, conn, settings, lot, monkeypatch):
+    url = f"/api/lots/copart/{lot.number}/analyses"
+    lot.photos.update({f"https://cs.copart.com/{n}_ful.jpg": jpeg() for n in "ab"})
+    offered = authed.get("/api/analysis-models").json()
+    assert offered["default"] == "claude-opus-5-5"
+    assert [m["id"] for m in offered["models"]] == [
+        "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]
+    assert offered["models"][1] == {
+        "id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5",
+        "note": "Faster, half the price of Opus 5.5", "input_usd": 2.0, "output_usd": 10.0}
+
+    refused = authed.post(url, json={"model": "claude-opus-4-8"})
+    assert (refused.status_code, refused.json()["detail"]) == (
+        422, "unsupported model 'claude-opus-4-8'")
+    assert authed.post(url, json={"model": "claude-sonnet-5-5"}).json()["model"] == (
+        "claude-sonnet-5-5")
+    FakeAI(monkeypatch)
+    va.process_next(conn, settings)
+    latest = authed.get(url).json()["latest"]
+    assert latest["model"] == "claude-sonnet-5-5"
+    assert latest["usage"]["analysis"]["model"] == "claude-sonnet-5-5"  # the model that ran
+    assert settings.ai_model == "claude-opus-5-5"  # the worker's own settings are untouched
+
+
 def test_analysis_requests_are_checked(authed, lot):
     assert authed.get("/api/lots/copart/0/analyses").status_code == 404
     assert authed.post("/api/lots/copart/0/analyses").status_code == 404

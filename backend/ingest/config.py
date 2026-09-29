@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # request. The provider is a key of `ai.CLIENTS`; the prompt and schema versions must be
     # ones vehicle_analysis.py knows.
     ai_provider: str = "anthropic"
-    ai_model: str = "claude-opus-5-5"
+    ai_model: str = "claude-opus-5-5"  # preselected on the lot page; one of ai.MODELS
     ai_language: str = "en"  # default output language of a requested analysis
     ai_prompt_version: str = "vehicle-damage-v1"
     ai_schema_version: str = "1.0"

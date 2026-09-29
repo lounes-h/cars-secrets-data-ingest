@@ -135,8 +135,9 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
 - **AI damage analysis** (`vehicle_analysis.py`, `ai.py`, see `docs/architecture.md`): only a
   person triggers it, from the lot page; never analyze lots automatically (each run spends API
   credit). The API queues a `vehicle_analyses` row (one queued/running per lot, partial unique
-  index); the worker runs it, stamped with `AI_PROVIDER`/`AI_MODEL`/`AI_PROMPT_VERSION`/
-  `AI_SCHEMA_VERSION`, and keeps what it sent and got back, success or not. Regenerating adds
+  index) with the model chosen in the page's dialog, one of `ai.MODELS` (default `AI_MODEL`;
+  the API refuses others); the worker runs it with that model, stamped with `AI_PROVIDER`/
+  `AI_PROMPT_VERSION`/`AI_SCHEMA_VERSION`, and keeps what it sent and got back, success or not. Regenerating adds
   a row, never overwrites one. At most `AI_MAX_IMAGES` (5) photos go to the model, shrunk to
   `AI_IMAGE_MAX_PX` (1024), renamed `image_01` …; with more photos than that, the model first
   picks them from 384 px copies. An answer is `completed` only if it passes `AnalysisV1`
@@ -144,8 +145,8 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   damage has no box). Changing the prompt or the answer's shape = a new entry in `PROMPTS` or
   `SCHEMAS` under a new version, never an edit of a released one. Another model provider = a
   function in `ai.CLIENTS`. No costs, values or bids in the analysis. Each model call's
-  tokens and cost are stored in `usage` and shown on the page; keep `ai.PRICES` in step
-  with the provider's prices.
+  tokens and cost are stored in `usage` and shown on the page; keep `ai.MODELS` in step
+  with the provider's prices, and offer only models that accept the client's request.
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API

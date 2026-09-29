@@ -265,6 +265,15 @@ export interface VehicleAnalysis {
   updated_at: string;
 }
 
+/** A model an analysis may use; prices in USD per million tokens. */
+export interface AnalysisModel {
+  id: string;
+  label: string;
+  note: string;
+  input_usd: number;
+  output_usd: number;
+}
+
 export interface LotAnalyses {
   /** The latest completed analysis, shown on the lot page. */
   latest: VehicleAnalysis | null;
@@ -356,9 +365,10 @@ export const api = {
   lotAnalyses: (source: string, lotNumber: string) =>
     request<LotAnalyses>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`),
-  requestAnalysis: (source: string, lotNumber: string) =>
+  analysisModels: () => request<{ default: string; models: AnalysisModel[] }>("GET", "/api/analysis-models"),
+  requestAnalysis: (source: string, lotNumber: string, model: string) =>
     request<VehicleAnalysis>(
-      "POST", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`, {}),
+      "POST", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`, { model }),
 };
 
 export { withParams };

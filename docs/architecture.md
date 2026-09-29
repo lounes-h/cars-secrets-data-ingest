@@ -321,12 +321,15 @@ the auction site, where dealers go to bid.
 
 ## AI damage analysis
 
-A person asks for it from the lot page ("Generate AI Analysis"). `POST
-/api/lots/{source}/{lot_number}/analyses` inserts a `queued` row in `vehicle_analyses`; a
-partial unique index allows one queued or running analysis per lot, so a second click gets a
-409. The worker's analysis thread claims the oldest queued row every `ANALYSIS_POLL_SECONDS`
-(3 s), stamps it with `AI_PROVIDER`, `AI_MODEL`, `AI_PROMPT_VERSION` and `AI_SCHEMA_VERSION`, and
-runs it (`vehicle_analysis.run`), one at a time:
+A person asks for it from the lot page: "Generate AI Analysis" opens a dialog that offers the
+models of `ai.MODELS` (`GET /api/analysis-models`: name, note, price per million tokens, with
+`AI_MODEL` preselected). `POST /api/lots/{source}/{lot_number}/analyses` with the chosen
+`model` inserts a `queued` row in `vehicle_analyses`; the API refuses a model that is not
+listed, so a client never picks an unpriced one. A partial unique index allows one queued or
+running analysis per lot, so a second click gets a 409. The worker's analysis thread claims the
+oldest queued row every `ANALYSIS_POLL_SECONDS` (3 s), stamps it with `AI_PROVIDER`,
+`AI_PROMPT_VERSION` and `AI_SCHEMA_VERSION` (and `AI_MODEL` if the request named no model), and
+runs it with the request's model (`vehicle_analysis.run`), one at a time:
 
 1. **Photos.** The provider's `fetch_images` lists the lot's photos; each is downloaded in its
    largest size (HD, else full, else thumbnail) and re-encoded as a JPEG whose longest side is
@@ -359,13 +362,14 @@ over the original photo from its normalized box.
 
 `usage` keeps, per model call (`selection`, `analysis`), the answering model, input and output
 tokens (photos count as input, thinking as output) and `cost_usd`. The cost is computed when
-the call is made, from `ai.PRICES` (USD per million tokens, as of 2026-09): keep that table in
+the call is made, from `ai.MODELS` (USD per million tokens, as of 2026-09): keep that table in
 step with Anthropic's prices. A model missing from it has no cost; the page then says "cost
 unknown". A call whose answer came back unusable (refused, cut off, not JSON, invalid) is
 billed, so it is recorded too, and a failed attempt shows what it spent. After a server-side
 fallback only the answering model's tokens are priced.
 
-The Anthropic client uses `claude-opus-5-5` at high effort, streams the answer (up to 32k
+The Anthropic client runs the chosen model (Opus 5.5, Sonnet 5.5 or Fable 5.1; Opus 5.5 by
+default) at high effort, streams the answer (up to 32k
 tokens, 300 s timeout) and opts into server-side fallback, which re-runs a request a safety
 classifier declines on the model Anthropic recommends. Another provider is a function in
 `ai.CLIENTS` with the same signature; a new prompt or schema is a new entry in

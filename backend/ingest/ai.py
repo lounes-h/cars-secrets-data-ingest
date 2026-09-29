@@ -19,17 +19,35 @@ from .config import Settings
 TIMEOUT = 300.0  # seconds per attempt; photos plus a long structured answer take a while
 MAX_TOKENS = 32000  # thinking and the answer; streamed, so no HTTP timeout at this size
 
-# USD per million input and output tokens (thinking is billed as output), as of 2026-09. Update
-# with Anthropic's prices; a model missing here still works, without a cost.
-PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0),
-          "claude-haiku-4-5": (1.0, 5.0), "claude-fable-5-1": (10.0, 50.0)}
+
+
+@dataclass(frozen=True)
+class Model:
+    label: str
+    note: str
+    input_usd: float  # per million tokens (photos count as input)
+    output_usd: float  # per million tokens (thinking is billed as output)
+
+
+# The models a person may choose for an analysis: each takes this client's request (effort,
+# structured outputs, server-side fallback). Prices as of 2026-09: keep them in step with
+# Anthropic's. A model answering that is missing here (a fallback) has no cost.
+MODELS = {
+    "claude-opus-5-5": Model("Claude Opus 5.5", "Anthropic's current Opus model", 4.0, 20.0),
+    "claude-sonnet-5-5": Model("Claude Sonnet 5.5", "Faster, half the price of Opus 5.5", 2.0,
+                               10.0),
+    "claude-fable-5-1": Model("Claude Fable 5.1",
+                              "Anthropic's most capable model, 2.5 times the price of Opus 5.5",
+                              10.0, 50.0),
+}
 
 
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
-    price = PRICES.get(model)
+    price = MODELS.get(model)
     if price is None:
         return None
-    return round((input_tokens * price[0] + output_tokens * price[1]) / 1_000_000, 6)
+    return round((input_tokens * price.input_usd + output_tokens * price.output_usd)
+                 / 1_000_000, 6)
 
 
 @dataclass(frozen=True)

@@ -69,6 +69,7 @@ describe("lot detail", () => {
     vi.spyOn(api, "lot").mockReturnValue(new Promise(() => {}));
     vi.spyOn(api, "lotImages").mockReturnValue(new Promise(() => {}));
     vi.spyOn(api, "lotAnalyses").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(api, "analysisModels").mockReturnValue(new Promise(() => {}));
     render(
       <QueryClientProvider client={new QueryClient()}>
         <MemoryRouter initialEntries={["/lots/copart/68264956"]}>
@@ -151,6 +152,7 @@ describe("lot detail page", () => {
     vi.spyOn(api, "lot").mockResolvedValue(data);
     vi.spyOn(api, "lotImages").mockResolvedValue(images);
     vi.spyOn(api, "lotAnalyses").mockResolvedValue({ latest: null, current: null });
+    vi.spyOn(api, "analysisModels").mockResolvedValue({ default: "claude-opus-5-5", models: [] });
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter initialEntries={["/lots/copart/68264956"]}>

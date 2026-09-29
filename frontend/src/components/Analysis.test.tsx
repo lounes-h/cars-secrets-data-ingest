@@ -62,7 +62,27 @@ const attempt = (status: VehicleAnalysis["status"], extra: Partial<VehicleAnalys
   completed_at: null, ...extra,
 });
 
-function show(data: LotAnalyses | Error) {
+const models = {
+  default: "claude-opus-5-5",
+  models: [
+    { id: "claude-opus-5-5", label: "Claude Opus 5.5", note: "Anthropic's current Opus model", input_usd: 4, output_usd: 20 },
+    { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", note: "Faster, half the price of Opus 5.5", input_usd: 2, output_usd: 10 },
+  ],
+};
+
+/** Opens the model dialog with the page's button and confirms with the chosen model. */
+async function generateWith(button: string, model?: string) {
+  fireEvent.click(await screen.findByRole("button", { name: button }));
+  const dialog = screen.getByRole("dialog", { name: button });
+  if (model) fireEvent.click(within(dialog).getByRole("radio", { name: new RegExp(model) }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+  return dialog;
+}
+
+function show(data: LotAnalyses | Error, offered: typeof models | Error = models) {
+  const list = vi.spyOn(api, "analysisModels");
+  if (offered instanceof Error) list.mockRejectedValue(offered);
+  else list.mockResolvedValue(offered);
   const load = vi.spyOn(api, "lotAnalyses");
   if (data instanceof Error) load.mockRejectedValue(data);
   else load.mockResolvedValue(data);
@@ -82,9 +102,10 @@ describe("AI analysis", () => {
     expect(await screen.findByText(/No analysis yet/)).toBeInTheDocument();
 
     load.mockResolvedValue({ latest: null, current: attempt("queued") });
-    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = await generateWith("Generate AI Analysis", "Claude Sonnet 5.5");
+    expect(dialog).not.toHaveAttribute("open");
     expect(await screen.findByRole("button", { name: "Generating AI Analysis…" })).toBeDisabled();
-    expect(request).toHaveBeenCalledWith("copart", "68264956");
+    expect(request).toHaveBeenCalledWith("copart", "68264956", "claude-sonnet-5-5");
     expect(await screen.findByRole("status")).toHaveTextContent("queued");
     expect(screen.queryByText(/No analysis yet/)).not.toBeInTheDocument();
   });
@@ -143,7 +164,8 @@ describe("AI analysis", () => {
 
     vi.spyOn(api, "requestAnalysis").mockResolvedValue(attempt("queued", { id: 3 }));
     load.mockResolvedValue({ latest: completed, current: attempt("queued", { id: 3 }) });
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate AI Analysis" }));
+    await generateWith("Regenerate AI Analysis");
+    expect(api.requestAnalysis).toHaveBeenCalledWith("copart", "68264956", "claude-opus-5-5");
     expect(await screen.findByRole("button", { name: "Generating AI Analysis…" })).toBeDisabled();
     expect(await screen.findByRole("status")).toHaveTextContent("The previous analysis is shown until then.");
     expect(screen.getByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
@@ -183,8 +205,34 @@ describe("AI analysis", () => {
     vi.spyOn(api, "requestAnalysis").mockRejectedValue(
       new ApiError(409, "an analysis of this lot is already in progress"));
     await screen.findByText(/No analysis yet/);
-    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    await generateWith("Generate AI Analysis");
     expect(await screen.findByRole("alert")).toHaveTextContent("an analysis of this lot is already in progress");
+  });
+
+  it("offers each model with its price, the default preselected, and cancels without a request", async () => {
+    show({ latest: null, current: null });
+    const request = vi.spyOn(api, "requestAnalysis");
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    expect(dialog).toHaveAttribute("open");
+    const opus = await within(dialog).findByRole("radio", { name: /Claude Opus 5.5/ });
+    expect(opus).toBeChecked();
+    expect(within(dialog).getByText(/Faster, half the price of Opus 5.5 · \$2 in \/ \$10 out per million tokens/))
+      .toBeInTheDocument();
+    expect(within(dialog).getAllByText(/default/)).toHaveLength(1);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(dialog).not.toHaveAttribute("open");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("says when the models cannot be loaded, and does not generate", async () => {
+    show({ latest: null, current: null }, new Error("models unavailable"));
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    expect(await within(dialog).findByText("models unavailable")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Generate" })).toBeDisabled();
   });
 
   it("shows a load error and keeps the button disabled", async () => {

@@ -100,6 +100,7 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?run ./start.sh to create .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       AI_LANGUAGE: ${AI_LANGUAGE:-en}  # language of a requested analysis unless it names one
+      AI_MODEL: ${AI_MODEL:-claude-opus-5-5}  # the model preselected for a new analysis
     volumes:
       - ./data:/data  # "retry" moves a failed file back into the inbox
     depends_on:

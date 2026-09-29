@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import {
   api, type AIUsage, type AnalysisImage, type DamageRegion, type DamageSeverity, type LotAnalyses,
   type ObservedDamage, type VehicleAnalysis,
@@ -55,24 +55,62 @@ function SeverityTag({ severity }: { severity: DamageSeverity }) {
   return <Badge tone={SEVERITY_TONE[severity]}>{severity}</Badge>;
 }
 
-/** The lot page's action: generate, or regenerate once an analysis exists. */
+const perMillion = (usd: number) => `$${usd}`;
+
+/** The lot page's action: generate, or regenerate once an analysis exists, with the model
+ * chosen in a dialog. */
 export function AnalysisButton({ source, lotNumber }: { source: string; lotNumber: string }) {
   const qc = useQueryClient();
   const key = ["lot-analysis", source, lotNumber];
+  const dialog = useRef<HTMLDialogElement>(null);
   const analyses = useLotAnalyses(source, lotNumber);
+  const models = useQuery({ queryKey: ["analysis-models"], queryFn: api.analysisModels, staleTime: Infinity });
+  const [picked, setPicked] = useState<string | null>(null);
+  const model = picked ?? models.data?.default;
   const generate = useMutation({
-    mutationFn: () => api.requestAnalysis(source, lotNumber),
+    mutationFn: (chosen: string) => api.requestAnalysis(source, lotNumber, chosen),
     // The queued request is current at once: the button never re-enables before the refetch.
     onSuccess: (queued) => qc.setQueryData<LotAnalyses>(key, (old) => ({ latest: old?.latest ?? null, current: queued })),
     onSettled: () => qc.invalidateQueries({ queryKey: key }),
   });
   const busy = generate.isPending || pending(analyses.data);
+  const title = analyses.data?.latest ? "Regenerate AI Analysis" : "Generate AI Analysis";
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    dialog.current?.close();
+    generate.mutate(model!);
+  };
   return (
     <>
-      <button className="primary" disabled={busy || !analyses.data} onClick={() => generate.mutate()}>
-        {busy ? "Generating AI Analysis…" : analyses.data?.latest ? "Regenerate AI Analysis" : "Generate AI Analysis"}
+      <button className="primary" disabled={busy || !analyses.data} onClick={() => dialog.current?.showModal()}>
+        {busy ? "Generating AI Analysis…" : title}
       </button>
       {generate.error && <span className="error" role="alert">{generate.error.message}</span>}
+      <dialog ref={dialog} className="model-dialog" aria-labelledby="model-dialog-title">
+        <form onSubmit={submit}>
+          <h2 id="model-dialog-title">{title}</h2>
+          <p className="muted small">Choose the model. Each analysis is billed by the tokens it uses (photos count as input).</p>
+          <QueryState isLoading={models.isLoading} error={models.error} />
+          <fieldset>
+            <legend className="visually-hidden">Model</legend>
+            {models.data?.models.map((m) => (
+              <label key={m.id} className="model-option">
+                <input type="radio" name="model" value={m.id} checked={model === m.id} onChange={() => setPicked(m.id)} />
+                <span>
+                  <strong>{m.label}</strong>{m.id === models.data.default && <span className="muted small"> · default</span>}
+                  <span className="muted small model-note">
+                    {m.note} · {perMillion(m.input_usd)} in / {perMillion(m.output_usd)} out per million tokens
+                  </span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="dialog-actions">
+            <button type="button" onClick={() => dialog.current?.close()}>Cancel</button>
+            <button type="submit" className="primary" disabled={!model}>Generate</button>
+          </div>
+        </form>
+      </dialog>
     </>
   );
 }

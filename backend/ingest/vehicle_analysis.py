@@ -467,6 +467,7 @@ def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photo
 def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
             record: dict[str, Any]) -> dict:
     """The validated analysis; fills `record` with what was sent and received on the way."""
+    settings = settings.model_copy(update={"ai_model": analysis["model"]})  # the one requested
     prompt = PROMPTS.get(analysis["prompt_version"])
     if prompt is None:
         raise AnalysisError(f"unknown prompt version {analysis['prompt_version']!r}")
@@ -545,10 +546,12 @@ def run(conn: Connection, settings: Settings, analysis: dict[str, Any]) -> dict[
 
 
 def claim(conn: Connection, settings: Settings) -> dict[str, Any] | None:
-    """Take the oldest queued analysis and stamp it with what will run it."""
+    """Take the oldest queued analysis and stamp it with what will run it: the model its
+    request chose, else AI_MODEL."""
     row = conn.execute(
         """UPDATE vehicle_analyses
-           SET status = 'processing', provider = %s, model = %s, prompt_version = %s,
+           SET status = 'processing', provider = %s, model = coalesce(model, %s),
+               prompt_version = %s,
                schema_version = %s, started_at = clock_timestamp(), updated_at = clock_timestamp()
            WHERE id = (SELECT id FROM vehicle_analyses WHERE status = 'queued'
                        ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
