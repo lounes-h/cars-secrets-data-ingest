@@ -444,6 +444,10 @@ def test_analysis_requests_are_checked(authed, lot):
 # --- the Anthropic client ------------------------------------------------------------------------
 
 class FakeStream:
+    """Like the SDK's: the request id is on the stream, not on the final message."""
+
+    request_id = "req_abc"
+
     def __init__(self, sent, message):
         self.sent, self.message = sent, message
 
@@ -480,7 +484,6 @@ def message(text, stop_reason="end_turn", stop_details=None):
         content=[SimpleNamespace(type="thinking"), SimpleNamespace(type="text", text=text)],
         stop_reason=stop_reason, stop_details=stop_details, model="claude-opus-5-5",
         usage=SimpleNamespace(input_tokens=1200, output_tokens=800))
-    reply._request_id = "req_abc"
     return reply
 
 

@@ -62,13 +62,13 @@ def ask_anthropic(settings: Settings, system: str, parts: list[Part],
             betas=["server-side-fallback-2026-07-01"], fallbacks="default",
         ) as stream:
             message = stream.get_final_message()
+            request_id = stream.request_id  # a streamed message does not carry it
     except anthropic.APIStatusError as exc:
         raise AIError(f"the AI provider rejected the request ({exc.status_code}): {exc.message}",
                       request_id=exc.request_id) from exc
     except anthropic.AnthropicError as exc:  # timeout, connection, missing API key
         raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}") from exc
-    request_id = message._request_id
-    raw = "".join(b.text for b in message.content if b.type == "text")
+    raw ="".join(b.text for b in message.content if b.type == "text")
     if message.stop_reason == "refusal":
         category = message.stop_details.category if message.stop_details else None
         raise AIError(f"the model declined the request ({category or 'no category'})",
