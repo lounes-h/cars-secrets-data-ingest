@@ -52,6 +52,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `alerts` | Alerts; at most one unresolved row per `fingerprint` |
 | `worker_heartbeat` | Liveness of the worker |
 | `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, tokens and cost of each model call (`usage`), the exact request (`request`: settings, and per call the parameters, prompts and message), error, timestamps |
+| `lot_favorites` | Lots each dashboard user marked as favorite (`username` = the session's user) |
 
 ### Why the schema survives CSV changes
 
@@ -369,7 +370,7 @@ photo limits and sizes, selection thresholds) and, per model call (`selection`, 
 exactly what was sent: the parameters (model, `max_tokens`, effort, betas, fallbacks, timeout),
 the system prompt, the user message (the metadata text, each photo's ID and its size in bytes,
 not the photo itself) and the output schema. A call that failed keeps its request too. The lot
-page shows all of it under "Prompt and Request". Analyses made before migration 0012 have none.
+page shows all of it under "Prompt and Request". Analyses made before migration 0013 have none.
 
 `usage` keeps, per model call (`selection`, `analysis`), the answering model, input and output
 tokens (photos count as input, thinking as output) and `cost_usd`. The cost is computed when

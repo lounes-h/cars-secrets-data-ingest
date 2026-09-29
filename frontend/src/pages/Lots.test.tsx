@@ -90,7 +90,7 @@ const lot: Lot = {
   sale_at: "2026-09-20T15:00:00Z", yard_code: "1", yard_name: "CA - VALLEJO",
   location_city: "VALLEJO", location_state: "CA", thumbnail_url: "https://cs.copart.com/a_thb.jpg",
   first_seen_at: "2026-09-15T10:00:00Z", last_seen_at: "2026-09-19T10:00:00Z",
-  last_changed_at: "2026-09-18T10:00:00Z", removed_at: null,
+  last_changed_at: "2026-09-18T10:00:00Z", removed_at: null, favorite: false,
 };
 const bare: Lot = {
   ...lot, lot_number: "41633106", year: null, model_group: null, vin: null, damage_primary: null,
@@ -126,6 +126,31 @@ describe("lot list", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThan(3);
     fireEvent.click(screen.getByText("2013 ACURA TSX"));
     expect(await screen.findByText("detail page")).toBeInTheDocument();
+  });
+
+  it("marks and unmarks favorites without opening the lot", async () => {
+    list([lot, { ...bare, favorite: true }]);
+    const add = vi.spyOn(api, "addFavorite").mockResolvedValue(undefined);
+    const remove = vi.spyOn(api, "removeFavorite").mockRejectedValue(new Error("server down"));
+    const unmark = await screen.findByRole("button", { name: "Remove from favorites" });
+    expect(unmark).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Add to favorites" }));
+    fireEvent.click(unmark);
+    await waitFor(() => expect(add).toHaveBeenCalledWith("copart", "68264956"));
+    expect(remove).toHaveBeenCalledWith("copart", "41633106");
+    await waitFor(() => expect(unmark).toHaveAttribute("title", "server down"));
+    expect(screen.queryByText("detail page")).not.toBeInTheDocument();
+  });
+
+  it("shows only favorites when asked", async () => {
+    const lots = list([]);
+    fireEvent.click(await screen.findByRole("button", { name: "★ Favorites" }));
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({
+      q: "", state: "all", limit: 50, offset: 0, favorites: "true" }));
+    expect(await screen.findByText(/No favorites match/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "★ Favorites" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "★ Favorites" }));
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 0 }));
   });
 
   it("pages through every match, and back", async () => {
@@ -232,6 +257,9 @@ describe("lot detail page", () => {
     expect(screen.getByRole("link", { name: "run #8" })).toHaveAttribute("href", "/runs/8");
     expect(screen.getAllByText(/∅/)).toHaveLength(2);
     expect(screen.getByText("All 2 source values")).toBeInTheDocument();
+    const add = vi.spyOn(api, "addFavorite").mockResolvedValue(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Add to favorites" }));
+    await waitFor(() => expect(add).toHaveBeenCalledWith("copart", "68264956"));
     expect(await screen.findByText("No photos for this lot.")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Generate AI Analysis" })).toBeEnabled();
     expect(screen.getByRole("heading", { name: "AI Analysis" })).toBeInTheDocument();
@@ -240,13 +268,14 @@ describe("lot detail page", () => {
   it("marks a removed lot and names another auction as it is", async () => {
     open({
       ...detail,
-      lot: { ...detail.lot, source: "iaai", removed_at: "2026-09-19T11:00:00Z", odometer: null,
+      lot: { ...detail.lot, source: "iaai", removed_at: "2026-09-19T11:00:00Z", odometer: null, favorite: true,
         vin: null, damage_primary: null, damage_secondary: null, sale_status: null, yard_name: null },
       history: [],
     });
     expect(await screen.findByText(/^removed /)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View on iaai ↗" })).toBeInTheDocument();
     expect(screen.getByText("Unchanged since first seen.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Favorite" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows the load error under the back link", async () => {
