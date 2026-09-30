@@ -640,21 +640,30 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
                         (source, lot_number)).fetchone() is None:
             raise HTTPException(404, "lot not found")
 
+    # the history's columns: no photos, result or request, which only the analysis itself needs
+    ANALYSIS_SUMMARY = """id, source, lot_number, status, language, requested_by, provider,
+        model, prompt_version, schema_version, image_count, usage, error, created_at,
+        started_at, completed_at, updated_at"""
+
     @api.get("/lots/{source}/{lot_number}/analyses")
     def lot_analyses(source: str, lot_number: str, conn: Conn) -> dict[str, Any]:
-        """The latest completed analysis, and the latest request whatever its status (in
-        progress, or failed after it). Older analyses stay in the database."""
+        """Every analysis of the lot, newest first, without their photos, result or request."""
         lot_exists(conn, source, lot_number)
-        key = {"source": source, "lot_number": lot_number}
-        latest = conn.execute(
+        return {"analyses": conn.execute(
+            f"""SELECT {ANALYSIS_SUMMARY} FROM vehicle_analyses
+                WHERE source = %s AND lot_number = %s ORDER BY id DESC""",
+            (source, lot_number)).fetchall()}
+
+    @api.get("/lots/{source}/{lot_number}/analyses/{analysis_id}")
+    def lot_analysis(source: str, lot_number: str, analysis_id: int,
+                     conn: Conn) -> dict[str, Any]:
+        row = conn.execute(
             f"""SELECT {ANALYSIS_COLUMNS} FROM vehicle_analyses
-                WHERE source = %(source)s AND lot_number = %(lot_number)s
-                  AND status = 'completed' ORDER BY id DESC LIMIT 1""", key).fetchone()
-        current = conn.execute(
-            f"""SELECT {ANALYSIS_COLUMNS} FROM vehicle_analyses
-                WHERE source = %(source)s AND lot_number = %(lot_number)s
-                ORDER BY id DESC LIMIT 1""", key).fetchone()
-        return {"latest": latest, "current": current}
+                WHERE id = %s AND source = %s AND lot_number = %s""",
+            (analysis_id, source, lot_number)).fetchone()
+        if row is None:
+            raise HTTPException(404, "analysis not found")
+        return row
 
     ADDED_MODEL = "id, provider, label, note, input_usd, output_usd, true AS custom"
 

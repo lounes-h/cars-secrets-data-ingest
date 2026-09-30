@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { AnalysisButton, AnalysisSection } from "../components/Analysis";
+import { AnalysisSection } from "../components/Analysis";
 import { FavoriteButton } from "../components/Favorite";
 import { Gallery } from "../components/Gallery";
 import { activeCount, LotFilters, type Filters } from "../components/LotFilters";
@@ -151,7 +151,6 @@ export function LotDetailPage() {
               View on {lot.source === "copart" ? "Copart" : lot.source} ↗
             </a>
           )}
-          <AnalysisButton source={source} lotNumber={lotNumber} />
         </div>
       </div>
       <div className="grid two-col">

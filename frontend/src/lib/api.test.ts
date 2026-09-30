@@ -55,6 +55,7 @@ describe("endpoints", () => {
     await api.lotImages("copart", "1");
     await api.lotFilters();
     await api.lotAnalyses("copart", "1");
+    await api.lotAnalysis("copart", "1", 7);
     await api.analysisModels();
     await api.requestAnalysis("copart", "1", "claude-opus-5-5");
     const added = { id: "ft:gpt-5.6:acme", provider: "openai", label: "Mine", note: "", input_usd: 1, output_usd: 2 };
@@ -69,7 +70,8 @@ describe("endpoints", () => {
       "GET /api/runs/3", "POST /api/runs/3/retry", "GET /api/runs/3/rows?kind=new", "GET /api/alerts",
       "POST /api/alerts/4/ack", "POST /api/alerts/4/resolve", "GET /api/schema", "GET /api/lots?q=vin",
       "GET /api/lots/copart/a%2Fb", "GET /api/lots/copart/1/images", "GET /api/lot-filters",
-      "GET /api/lots/copart/1/analyses", "GET /api/analysis-models", "POST /api/lots/copart/1/analyses",
+      "GET /api/lots/copart/1/analyses", "GET /api/lots/copart/1/analyses/7", "GET /api/analysis-models",
+      "POST /api/lots/copart/1/analyses",
       "GET /api/analysis-models/available?provider=openai", "POST /api/analysis-models",
       "PUT /api/analysis-models/ft%3Agpt-5.6%3Aacme", "DELETE /api/analysis-models/ft%3Agpt-5.6%3Aacme",
       "PUT /api/lots/copart/1/favorite", "DELETE /api/lots/copart/1/favorite",

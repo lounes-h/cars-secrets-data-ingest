@@ -1,25 +1,27 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import {
-  api, type AddedModel, type AIUsage, type AnalysisModel, type AnalysisImage, type AnalysisRequestRecord, type DamageRegion,
-  type DamageSeverity, type LotAnalyses, type ObservedDamage, type SentContent, type SentRequest,
-  type VehicleAnalysis,
+  api, type AddedModel, type AIUsage, type AnalysisModel, type AnalysisImage, type AnalysisRequestRecord,
+  type AnalysisStatus, type AnalysisSummary, type DamageRegion, type DamageSeverity, type LotAnalyses,
+  type ObservedDamage, type SentContent, type SentRequest, type VehicleAnalysis,
 } from "../lib/api";
-import { bytes, dateTime, int } from "../lib/format";
+import { bytes, dateTime, duration, int } from "../lib/format";
 import { Badge, QueryState } from "./ui";
 
 // The AI condition and damage analysis of a lot: generated on request by the worker, shown on
-// the lot page. Photos are the auction's own; the analysis only adds marked areas over them.
+// the lot page with every earlier one. Photos are the auction's own; the analysis only adds
+// marked areas over them.
 
-const pending = (data?: LotAnalyses) =>
-  data?.current?.status === "queued" || data?.current?.status === "processing";
+// at most one runs per lot, and it is the newest
+const pending = (analysis?: AnalysisSummary) =>
+  analysis?.status === "queued" || analysis?.status === "processing";
 
 function useLotAnalyses(source: string, lotNumber: string) {
   return useQuery({
     queryKey: ["lot-analysis", source, lotNumber],
     queryFn: () => api.lotAnalyses(source, lotNumber),
     // Live events refresh it; polling only covers a dropped event stream while one runs.
-    refetchInterval: (query) => (pending(query.state.data) ? 5000 : false),
+    refetchInterval: (query) => (pending(query.state.data?.analyses[0]) ? 5000 : false),
   });
 }
 
@@ -36,18 +38,35 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 const STEP_NAMES: Record<string, string> = { selection: "photo selection", analysis: "analysis" };
 
-/** "14,210 tokens (11,000 in, 3,210 out) · $0.108 (photo selection $0.021, analysis $0.087)" */
-export function spent(usage: VehicleAnalysis["usage"]): string | null {
+/** An analysis's tokens and cost over its model calls, with each call's cost when there are
+ * several ("analysis $0.087 · photo selection $0.021"). The cost is unknown when a model had no
+ * price. */
+export function tally(usage: VehicleAnalysis["usage"]) {
   const steps = Object.entries(usage ?? {}).filter((e): e is [string, AIUsage] => !!e[1]);
   if (steps.length === 0) return null;
-  const input = steps.reduce((n, [, u]) => n + u.input_tokens, 0);
-  const output = steps.reduce((n, [, u]) => n + u.output_tokens, 0);
   const known = steps.every(([, u]) => u.cost_usd != null);
-  const cost = known ? usd.format(steps.reduce((n, [, u]) => n + u.cost_usd!, 0)) : "cost unknown";
-  const parts = known && steps.length > 1
-    ? ` (${steps.map(([step, u]) => `${STEP_NAMES[step]} ${usd.format(u.cost_usd!)}`).join(", ")})`
-    : "";
-  return `${int(input + output)} tokens (${int(input)} in, ${int(output)} out) · ${cost}${parts}`;
+  return {
+    input: steps.reduce((n, [, u]) => n + u.input_tokens, 0),
+    output: steps.reduce((n, [, u]) => n + u.output_tokens, 0),
+    cost: known ? usd.format(steps.reduce((n, [, u]) => n + u.cost_usd!, 0)) : "unknown",
+    split: known && steps.length > 1
+      ? steps.map(([step, u]) => `${STEP_NAMES[step]} ${usd.format(u.cost_usd!)}`).join(" · ") : null,
+  };
+}
+
+/** How long the worker took: "1m 28s", "48.3s" */
+function took({ started_at, completed_at }: AnalysisSummary): string {
+  return started_at && completed_at ? duration((Date.parse(completed_at) - Date.parse(started_at)) / 1000) : "—";
+}
+
+const STATUS: Record<AnalysisStatus, ["info" | "good" | "warning", string]> = {
+  queued: ["info", "queued"], processing: ["info", "generating"], completed: ["good", "completed"],
+  failed: ["warning", "failed"],
+};
+
+function StatusTag({ status }: { status: AnalysisStatus }) {
+  const [tone, label] = STATUS[status];
+  return <Badge tone={tone}>{label}</Badge>;
 }
 
 const SEVERITY_TONE = { severe: "critical", moderate: "warning", minor: "info", unknown: "neutral" } as const;
@@ -135,9 +154,9 @@ function ModelForm({ model, onDone }: { model: AnalysisModel | null; onDone: (sa
   );
 }
 
-/** The lot page's action: generate, or regenerate once an analysis exists, with the model
+/** The section's action: generate, or regenerate once an analysis exists, with the model
  * chosen in a dialog, where models can also be added, and added ones changed or deleted. */
-export function AnalysisButton({ source, lotNumber }: { source: string; lotNumber: string }) {
+function AnalysisButton({ source, lotNumber, onQueued }: { source: string; lotNumber: string; onQueued: () => void }) {
   const qc = useQueryClient();
   const key = ["lot-analysis", source, lotNumber];
   const dialog = useRef<HTMLDialogElement>(null);
@@ -149,16 +168,20 @@ export function AnalysisButton({ source, lotNumber }: { source: string; lotNumbe
   const model = models.data?.models.some((m) => m.id === picked) ? picked : models.data?.default;
   const generate = useMutation({
     mutationFn: (chosen: string) => api.requestAnalysis(source, lotNumber, chosen),
-    // The queued request is current at once: the button never re-enables before the refetch.
-    onSuccess: (queued) => qc.setQueryData<LotAnalyses>(key, (old) => ({ latest: old?.latest ?? null, current: queued })),
+    // The queued request is listed at once: the button never re-enables before the refetch.
+    onSuccess: (queued) => {
+      qc.setQueryData<LotAnalyses>(key, (old) => ({ analyses: [queued, ...(old?.analyses ?? [])] }));
+      onQueued();
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: key }),
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteModel(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["analysis-models"] }),
   });
-  const busy = generate.isPending || pending(analyses.data);
-  const title = analyses.data?.latest ? "Regenerate AI Analysis" : "Generate AI Analysis";
+  const busy = generate.isPending || pending(analyses.data?.analyses[0]);
+  const title = analyses.data?.analyses.some((a) => a.status === "completed")
+    ? "Regenerate AI Analysis" : "Generate AI Analysis";
   const submit = (e: FormEvent) => {
     e.preventDefault();
     dialog.current?.close();
@@ -221,29 +244,107 @@ export function AnalysisButton({ source, lotNumber }: { source: string; lotNumbe
   );
 }
 
-function Progress({ current, latest }: LotAnalyses) {
-  if (!current) return null;
-  if (current.status === "queued" || current.status === "processing") {
+/** What became of the newest request, while another analysis is shown or it is running. */
+function Progress({ newest, shown }: { newest: AnalysisSummary; shown: AnalysisSummary }) {
+  if (pending(newest)) {
     return (
       <div className="banner" role="status">
-        <Badge tone="info">{current.status === "queued" ? "queued" : "generating"}</Badge>
-        <span>Analyzing the photos; this takes a minute or two.{latest && " The previous analysis is shown until then."}</span>
+        <StatusTag status={newest.status} />
+        <span>
+          Analyzing the photos with {newest.model}; this takes a minute or two.
+          {shown !== newest && " The previous analysis is shown until then."}
+        </span>
       </div>
     );
   }
-  if (current.status === "failed" && (!latest || current.id > latest.id)) {
+  if (newest.status === "failed" && shown !== newest) {
     return (
       <div className="banner degraded" role="alert">
-        <Badge tone="warning">failed</Badge>
+        <StatusTag status="failed" />
         <span className="wrap-anywhere">
-          The latest analysis failed ({dateTime(current.completed_at)}): {current.error}
-          {spent(current.usage) && ` It used ${spent(current.usage)}.`}
-          {latest && " The previous analysis is shown."}
+          The latest analysis failed ({dateTime(newest.completed_at)}): {newest.error} The previous analysis is
+          shown; select the failed one in the history for its request.
         </span>
       </div>
     );
   }
   return null;
+}
+
+function Fact({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}{sub && <span className="fact-sub">{sub}</span>}</dd>
+    </div>
+  );
+}
+
+/** What an analysis ran with, who asked for it, and what it cost. */
+function Facts({ analysis: a }: { analysis: AnalysisSummary }) {
+  const used = tally(a.usage);
+  return (
+    <div className="analysis-head">
+      <div className="status-line wrap">
+        <strong className="mono">{a.model}</strong>
+        {a.provider && <span className="muted">{PROVIDERS[a.provider] ?? a.provider}</span>}
+        <StatusTag status={a.status} />
+        <span className="muted small push">
+          {dateTime(a.completed_at ?? a.created_at)}{a.requested_by && ` · requested by ${a.requested_by}`}
+        </span>
+      </div>
+      <dl className="facts">
+        <Fact label="Cost" value={used?.cost ?? "—"} sub={used?.split} />
+        <Fact label="Tokens" value={used ? int(used.input + used.output) : "—"}
+          sub={used && `${int(used.input)} in · ${int(used.output)} out`} />
+        <Fact label="Photos" value={a.image_count ?? "—"} />
+        <Fact label="Time" value={took(a)} />
+        <Fact label="Prompt" value={a.prompt_version ?? "—"} />
+        <Fact label="Schema" value={a.schema_version ?? "—"} />
+      </dl>
+    </div>
+  );
+}
+
+/** Every analysis of the lot, newest first, to compare what each model gave for its cost. */
+function History({ analyses, shown, onPick }: {
+  analyses: AnalysisSummary[]; shown: AnalysisSummary; onPick: (id: number) => void;
+}) {
+  return (
+    <div className="table-wrap">
+      <table aria-label="Analysis history">
+        <thead>
+          <tr>
+            <th>Requested</th><th>Model</th><th>Status</th><th className="num">Photos</th>
+            <th className="num">Tokens</th><th className="num">Cost</th><th className="num">Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {analyses.map((a) => {
+            const used = tally(a.usage);
+            return (
+              <tr key={a.id} className="clickable" aria-current={a === shown || undefined} onClick={() => onPick(a.id)}>
+                <td>
+                  {/* the row's click: the button makes the row reachable by keyboard */}
+                  <button type="button" className="link-button">{dateTime(a.created_at)}</button>
+                  {a.requested_by && <span className="muted small"> · {a.requested_by}</span>}
+                </td>
+                <td>
+                  <span className="mono">{a.model}</span>
+                  {a.provider && <span className="muted small"> · {PROVIDERS[a.provider] ?? a.provider}</span>}
+                </td>
+                <td><StatusTag status={a.status} /></td>
+                <td className="num">{a.image_count ?? "—"}</td>
+                <td className="num">{used ? int(used.input + used.output) : "—"}</td>
+                <td className="num">{used?.cost ?? "—"}</td>
+                <td className="num">{took(a)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function RegionDetails({ region, damage }: { region: DamageRegion; damage: ObservedDamage }) {
@@ -368,14 +469,7 @@ function Result({ analysis }: { analysis: VehicleAnalysis }) {
   const photos = (ids: string[]) => ids.map((id) => `#${photo.get(id)}`).join(", ");
 
   return (
-    <div className="analysis">
-      <p className="muted small">
-        {analysis.provider} {analysis.model} · prompt {analysis.prompt_version} · schema {analysis.schema_version}
-        {" · "}{analysis.image_count} photos · {dateTime(analysis.completed_at)}
-        {analysis.requested_by && ` · requested by ${analysis.requested_by}`}
-        {spent(analysis.usage) && <><br />Used {spent(analysis.usage)}</>}
-      </p>
-
+    <>
       <h3>General Summary</h3>
       <p>{general.summary}</p>
       <div className="grid two-col">
@@ -459,26 +553,59 @@ function Result({ analysis }: { analysis: VehicleAnalysis }) {
         <summary className="small">Raw analysis JSON</summary>
         <pre className="raw-json">{JSON.stringify(result, null, 2)}</pre>
       </details>
+    </>
+  );
+}
+
+/** One analysis: its facts, then its result, or for a failure its error and what was sent. */
+function Shown({ source, lotNumber, analysis }: { source: string; lotNumber: string; analysis: AnalysisSummary }) {
+  const finished = analysis.status === "completed" || analysis.status === "failed";
+  const full = useQuery({
+    queryKey: ["vehicle-analysis", analysis.id],
+    queryFn: () => api.lotAnalysis(source, lotNumber, analysis.id),
+    enabled: finished,
+    staleTime: Infinity,  // a finished analysis never changes
+  });
+  return (
+    <div className="analysis">
+      <Facts analysis={analysis} />
+      {analysis.status === "failed" && (
+        <div className="banner degraded wrap-anywhere"><StatusTag status="failed" />{analysis.error}</div>
+      )}
+      <QueryState isLoading={full.isLoading} error={full.error} />
+      {full.data && (analysis.status === "completed" ? <Result analysis={full.data} /> : (
+        <>
+          <h3>Prompt and Request</h3>
+          <RequestRecord request={full.data.request} />
+        </>
+      ))}
     </div>
   );
 }
 
-/** The lot page's AI Analysis section: the latest completed analysis, and any newer attempt. */
+/** The lot page's AI Analysis section: the action, every analysis of the lot, and the one
+ * selected there, by default the latest completed one, so a failed regeneration hides nothing. */
 export function AnalysisSection({ source, lotNumber }: { source: string; lotNumber: string }) {
-  const analyses = useLotAnalyses(source, lotNumber);
+  const query = useLotAnalyses(source, lotNumber);
+  const [picked, setPicked] = useState<number | null>(null);
+  const analyses = query.data?.analyses ?? [];
+  const shown = analyses.find((a) => a.id === picked) ?? analyses.find((a) => a.status === "completed") ?? analyses[0];
   return (
     <section className="card stack" aria-labelledby="ai-analysis">
-      <h2 id="ai-analysis">AI Analysis</h2>
-      <QueryState isLoading={analyses.isLoading} error={analyses.error} />
-      {analyses.data && <Progress {...analyses.data} />}
-      {analyses.data?.latest
-        ? <Result analysis={analyses.data.latest} />
-        : analyses.data && !pending(analyses.data) && (
-          <p className="muted">
-            No analysis yet. Generate one to get a summary of the vehicle's condition, its visible and
-            possible hidden damage, and the damaged areas marked on its photos.
-          </p>
-        )}
+      <div className="section-head">
+        <h2 id="ai-analysis">AI Analysis</h2>
+        {/* a new request shows once it completes */}
+        <AnalysisButton source={source} lotNumber={lotNumber} onQueued={() => setPicked(null)} />
+      </div>
+      <QueryState isLoading={query.isLoading} error={query.error} />
+      {shown && <Progress newest={analyses[0]} shown={shown} />}
+      {analyses.length > 1 && <History analyses={analyses} shown={shown} onPick={setPicked} />}
+      {shown ? <Shown key={shown.id} source={source} lotNumber={lotNumber} analysis={shown} /> : query.data && (
+        <p className="muted">
+          No analysis yet. Generate one to get a summary of the vehicle's condition, its visible and
+          possible hidden damage, and the damaged areas marked on its photos.
+        </p>
+      )}
     </section>
   );
 }

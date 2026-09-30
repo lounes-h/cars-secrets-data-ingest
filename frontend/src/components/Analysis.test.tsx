@@ -1,10 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
-import {
-  api, ApiError, type AnalysisResult, type LotAnalyses, type SentRequest, type VehicleAnalysis,
-} from "../lib/api";
-import { AnalysisButton, AnalysisSection, spent, words } from "./Analysis";
+import { api, ApiError, type AnalysisResult, type SentRequest, type VehicleAnalysis } from "../lib/api";
+import { dateTime } from "../lib/format";
+import { AnalysisSection, tally, words } from "./Analysis";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -100,40 +99,59 @@ async function generateWith(button: string, model?: string) {
   return dialog;
 }
 
-function show(data: LotAnalyses | Error, offered: typeof models | Error = models) {
+/** Renders the section over a lot with these analyses (newest first). The list is served as the
+ * API lists it, without photos, result or request; each analysis in full by its id. Returns a
+ * function that changes the analyses, and the query client, to refresh as a live event does. */
+function show(analyses: VehicleAnalysis[] | Error, offered: typeof models | Error = models) {
   const list = vi.spyOn(api, "analysisModels");
   if (offered instanceof Error) list.mockRejectedValue(offered);
   else list.mockResolvedValue(offered);
+  const known = new Map<number, VehicleAnalysis>();
   const load = vi.spyOn(api, "lotAnalyses");
-  if (data instanceof Error) load.mockRejectedValue(data);
-  else load.mockResolvedValue(data);
+  const listed = (next: VehicleAnalysis[]) => {
+    next.forEach((a) => known.set(a.id, a));
+    load.mockResolvedValue({ analyses: next.map(({ images: _i, result: _r, request: _q, ...summary }) => summary) });
+  };
+  if (analyses instanceof Error) load.mockRejectedValue(analyses);
+  else listed(analyses);
+  vi.spyOn(api, "lotAnalysis").mockImplementation(async (_source, _lot, id) => known.get(id)!);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <AnalysisButton source="copart" lotNumber="68264956" />
+    <QueryClientProvider client={qc}>
       <AnalysisSection source="copart" lotNumber="68264956" />
     </QueryClientProvider>,
   );
-  return load;
+  return { listed, qc };
 }
+
+/** The value of one of the shown analysis's facts. */
+const fact = (label: string) => screen.getByText(label, { selector: "dt" }).nextElementSibling!;
+
+/** The history's rows, newest first. */
+const historyRows = () => within(screen.getByRole("table", { name: "Analysis history" })).getAllByRole("row").slice(1);
 
 describe("AI analysis", () => {
   it("generates the first analysis and shows it is running", async () => {
-    const load = show({ latest: null, current: null });
+    const { listed } = show([]);
     const request = vi.spyOn(api, "requestAnalysis").mockResolvedValue(attempt("queued"));
     expect(await screen.findByText(/No analysis yet/)).toBeInTheDocument();
 
-    load.mockResolvedValue({ latest: null, current: attempt("queued") });
+    listed([attempt("queued")]);
     const dialog = await generateWith("Generate AI Analysis", "Claude Sonnet 5.5");
     expect(dialog).not.toHaveAttribute("open");
     expect(await screen.findByRole("button", { name: "Generating AI Analysis…" })).toBeDisabled();
     expect(request).toHaveBeenCalledWith("copart", "68264956", "claude-sonnet-5-5");
-    expect(await screen.findByRole("status")).toHaveTextContent("queued");
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "queuedAnalyzing the photos with claude-opus-5-5; this takes a minute or two.");
     expect(screen.queryByText(/No analysis yet/)).not.toBeInTheDocument();
+    expect(fact("Cost")).toHaveTextContent("—");
+    expect(screen.queryByRole("table", { name: "Analysis history" })).not.toBeInTheDocument();  // just one
   });
 
   it("shows every section of the latest analysis and offers to regenerate it", async () => {
-    show({ latest: completed, current: completed });
+    show([completed]);
     expect(await screen.findByRole("button", { name: "Regenerate AI Analysis" })).toBeEnabled();
+    await screen.findByRole("heading", { name: "General Summary" });  // loaded after the history
     for (const name of ["General Summary", "Damage Analysis", "Observed Damage", "Possible Hidden Damage",
       "Damaged Parts", "Interactive Damage Images", "Limitations"]) {
       expect(screen.getByRole("heading", { name })).toBeInTheDocument();
@@ -146,16 +164,25 @@ describe("AI analysis", () => {
     expect(screen.getAllByText("Front bumper")).toHaveLength(3);  // observed, parts, hidden's basis
     expect(screen.getByText("Repair or replace")).toBeInTheDocument();
     expect(screen.getByText("No photo of the underside.")).toBeInTheDocument();
-    expect(screen.getByText(/claude-opus-5-5 · prompt vehicle-damage-v1 · schema 1.0 · 3 photos/)).toBeInTheDocument();
-    expect(screen.getByText(/requested by admin/)).toBeInTheDocument();
-    expect(screen.getByText(
-      /Used 15,500 tokens \(11,400 in, 4,100 out\) · \$0\.128 \(photo selection \$0\.022, analysis \$0\.106\)/,
-    )).toBeInTheDocument();
     expect(screen.getByText("Raw analysis JSON").closest("details")).toHaveTextContent('"schema_version": "1.0"');
   });
 
+  it("heads the analysis with its model, who asked for it, and its cost, tokens and time", async () => {
+    show([completed]);
+    const head = (await screen.findByText("Cost", { selector: "dt" })).closest<HTMLElement>(".analysis-head")!;
+    expect(within(head).getByText("claude-opus-5-5")).toBeInTheDocument();
+    expect(head).toHaveTextContent(/Anthropic.*completed/);
+    expect(head).toHaveTextContent(`${dateTime(completed.completed_at)} · requested by admin`);
+    expect(fact("Cost")).toHaveTextContent("$0.128photo selection $0.022 · analysis $0.106");
+    expect(fact("Tokens")).toHaveTextContent("15,50011,400 in · 4,100 out");
+    expect(fact("Photos")).toHaveTextContent("3");
+    expect(fact("Time")).toHaveTextContent("1m 28s");
+    expect(fact("Prompt")).toHaveTextContent("vehicle-damage-v1");
+    expect(fact("Schema")).toHaveTextContent("1.0");
+  });
+
   it("shows the settings, prompts and request parameters each model call was sent", async () => {
-    show({ latest: completed, current: completed });
+    show([completed]);
     expect(await screen.findByRole("heading", { name: "Prompt and Request" })).toBeInTheDocument();
     expect(screen.getByText("image_max_px").nextSibling).toHaveTextContent("1024");
     expect(screen.getByText("Photo selection call · claude-opus-5-5 · 2 photos")).toBeInTheDocument();
@@ -187,7 +214,7 @@ describe("AI analysis", () => {
     };
     const ran = { ...completed, provider: "openai", model: "gpt-6.1-sol",
       request: { settings: { provider: "openai", model: "gpt-6.1-sol" }, analysis: openai } };
-    show({ latest: ran, current: ran });
+    show([ran]);
     const call = (await screen.findByText("Analysis call · gpt-6.1-sol · 1 photos")).closest("details")!;
     expect(within(call).getByText("You are a senior vehicle damage appraiser.")).toBeInTheDocument();
     expect(within(call).getByText(/Auction metadata: \{"make": "ACURA"\}/)).toBeInTheDocument();
@@ -203,7 +230,7 @@ describe("AI analysis", () => {
   });
 
   it("marks damage on the original photos and explains a marked area on hover or click", async () => {
-    show({ latest: completed, current: completed });
+    show([completed]);
     const box = await screen.findByRole("button", { name: "Front bumper damage, 90% confidence" });
     expect(box).toHaveStyle({ left: "10%", top: "50%", width: "60%", height: "40%" });
     const photos = screen.getAllByRole("figure");
@@ -222,37 +249,78 @@ describe("AI analysis", () => {
     expect(within(photos[0]).getByText("severe")).toBeInTheDocument();
   });
 
-  it("keeps the previous analysis when a regeneration fails, and says so", async () => {
-    const load = show({ latest: completed, current: attempt("failed", {
-      error: "AIError: the answer is not valid JSON", completed_at: "2026-09-28T11:00:00Z",
+  it("keeps the previous analysis when a regeneration fails, and shows the failure on selection", async () => {
+    const failed = attempt("failed", {
+      error: "AIError: the answer is not valid JSON", created_at: "2026-09-28T10:59:00Z",
+      started_at: "2026-09-28T10:59:10Z", completed_at: "2026-09-28T11:00:00Z",
       usage: { analysis: { model: "claude-opus-5-5", input_tokens: 800, output_tokens: 200, cost_usd: 0.0072 } },
-    }) });
+    });
+    const { listed, qc } = show([failed, completed]);
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /The latest analysis failed .*: AIError: the answer is not valid JSON It used 1,000 tokens \(800 in, 200 out\) · \$0\.007\. The previous analysis is shown\./);
-    expect(screen.getByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
+      /The latest analysis failed .*: AIError: the answer is not valid JSON The previous analysis is shown/);
+    expect(await screen.findByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
+    const [newest, older] = historyRows();
+    expect(older).toHaveAttribute("aria-current", "true");
+    expect(newest).not.toHaveAttribute("aria-current");
+    expect(newest).toHaveTextContent(/failed.*1,000.*\$0\.007.*50\.0s/);
+    expect(older).toHaveTextContent(/admin.*claude-opus-5-5 · Anthropic.*completed.*3.*15,500.*\$0\.128.*1m 28s/);
 
-    vi.spyOn(api, "requestAnalysis").mockResolvedValue(attempt("queued", { id: 3 }));
-    load.mockResolvedValue({ latest: completed, current: attempt("queued", { id: 3 }) });
-    await generateWith("Regenerate AI Analysis");
-    expect(api.requestAnalysis).toHaveBeenCalledWith("copart", "68264956", "claude-opus-5-5");
+    // the failed one shows its error and what it sent, in place of the previous analysis
+    fireEvent.click(within(newest).getByRole("button", { name: dateTime(failed.created_at) }));
+    expect(newest).toHaveAttribute("aria-current", "true");
+    expect(await screen.findByRole("heading", { name: "Prompt and Request" })).toBeInTheDocument();
+    expect(screen.getByText("Analysis call · claude-opus-5-5 · 2 photos")).toBeInTheDocument();
+    expect(screen.getByText("AIError: the answer is not valid JSON").closest(".banner")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();  // it is the one shown
+    expect(screen.queryByText("2013 Acura TSX with a heavy front impact.")).not.toBeInTheDocument();
+    fireEvent.click(older);  // anywhere on the row
+    expect(await screen.findByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
+    fireEvent.click(newest);
+
+    // regenerating goes back to the latest completed analysis until the new one is done
+    const queued = attempt("queued", { id: 3, model: "claude-sonnet-5-5", created_at: "2026-09-28T12:00:00Z" });
+    vi.spyOn(api, "requestAnalysis").mockResolvedValue(queued);
+    listed([queued, failed, completed]);
+    await generateWith("Regenerate AI Analysis", "Claude Sonnet 5.5");
+    expect(api.requestAnalysis).toHaveBeenCalledWith("copart", "68264956", "claude-sonnet-5-5");
     expect(await screen.findByRole("button", { name: "Generating AI Analysis…" })).toBeDisabled();
-    expect(await screen.findByRole("status")).toHaveTextContent("The previous analysis is shown until then.");
-    expect(screen.getByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Analyzing the photos with claude-sonnet-5-5; this takes a minute or two. The previous analysis is shown until then.");
+    expect(await screen.findByText("2013 Acura TSX with a heavy front impact.")).toBeInTheDocument();
+    expect(historyRows()).toHaveLength(3);
+    expect(historyRows()[0]).toHaveTextContent("queued");
+
+    const done = { ...completed, id: 3, model: "claude-sonnet-5-5", created_at: queued.created_at,
+      result: { ...result, general_summary: { ...result.general_summary, summary: "Sonnet's view of the Acura." } } };
+    listed([done, failed, completed]);
+    await qc.invalidateQueries({ queryKey: ["lot-analysis"] });  // as the analysis event does
+    expect(await screen.findByText("Sonnet's view of the Acura.")).toBeInTheDocument();
+    expect(historyRows()[0]).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("reports a failed first analysis", async () => {
-    show({ latest: null, current: attempt("failed", { error: "AnalysisError: the lot has no usable photos" }) });
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("AnalysisError: the lot has no usable photos");
-    expect(alert).not.toHaveTextContent("previous");
-    expect(screen.getByText(/No analysis yet/)).toBeInTheDocument();
+  it("shows a failed first analysis, with what it sent", async () => {
+    show([attempt("failed", { error: "AnalysisError: the lot has no usable photos" })]);
+    expect(await screen.findByText("AnalysisError: the lot has no usable photos")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Prompt and Request" })).toBeInTheDocument();
+    expect(screen.queryByText(/No analysis yet/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate AI Analysis" })).toBeEnabled();
   });
 
   it("shows the previous analysis while a new one is generated", async () => {
-    show({ latest: completed, current: attempt("processing") });
+    show([attempt("processing"), completed]);
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "generatingAnalyzing the photos; this takes a minute or two. The previous analysis is shown until then.");
+      "generatingAnalyzing the photos with claude-opus-5-5; this takes a minute or two. The previous analysis is shown until then.");
     expect(screen.getByRole("button", { name: "Generating AI Analysis…" })).toBeDisabled();
+    expect(historyRows()[0]).toHaveTextContent(/generating.*—.*—.*—.*—/);
+  });
+
+  it("says when an analysis cannot be loaded", async () => {
+    show([completed]);
+    vi.spyOn(api, "lotAnalysis").mockRejectedValue(new ApiError(404, "analysis not found"));
+    expect(await screen.findByText("analysis not found")).toBeInTheDocument();
+    expect(fact("Cost")).toHaveTextContent("$0.128");  // the history's facts still show
   });
 
   it("says what an analysis found nothing of", async () => {
@@ -261,7 +329,7 @@ describe("AI analysis", () => {
       damage_analysis: { summary: "No damage visible.", observed_damage: [], possible_hidden_damage: [] },
       damaged_parts: [], image_annotations: [], limitations: [],
     };
-    show({ latest: { ...completed, result: empty, requested_by: null, request: null }, current: null });
+    show([{ ...completed, result: empty, requested_by: null, request: null }]);
     expect(await screen.findByText("No damage visible in the photos.")).toBeInTheDocument();
     expect(screen.getByText("None suspected.")).toBeInTheDocument();
     expect(screen.getAllByText("None.")).toHaveLength(3);
@@ -271,7 +339,7 @@ describe("AI analysis", () => {
   });
 
   it("shows why a request was refused", async () => {
-    show({ latest: null, current: null });
+    show([]);
     vi.spyOn(api, "requestAnalysis").mockRejectedValue(
       new ApiError(409, "an analysis of this lot is already in progress"));
     await screen.findByText(/No analysis yet/);
@@ -280,7 +348,7 @@ describe("AI analysis", () => {
   });
 
   it("offers each model with its price, the default preselected, and cancels without a request", async () => {
-    show({ latest: null, current: null });
+    show([]);
     const request = vi.spyOn(api, "requestAnalysis");
     await screen.findByText(/No analysis yet/);
     fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
@@ -297,7 +365,7 @@ describe("AI analysis", () => {
   });
 
   it("says when the models cannot be loaded, and does not generate", async () => {
-    show({ latest: null, current: null }, new Error("models unavailable"));
+    show([], new Error("models unavailable"));
     await screen.findByText(/No analysis yet/);
     fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
     const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
@@ -306,7 +374,7 @@ describe("AI analysis", () => {
   });
 
   it("adds a model from the provider's list, with its price, and picks it", async () => {
-    show({ latest: null, current: null });
+    show([]);
     const listed = vi.spyOn(api, "availableModels").mockImplementation(async (provider) => ({
       models: provider === "anthropic"
         ? [{ id: "claude-haiku-5", label: "Claude Haiku 5" }] : [{ id: "gpt-5.6", label: "gpt-5.6" }],
@@ -345,7 +413,7 @@ describe("AI analysis", () => {
   });
 
   it("changes and deletes an added model, never a built-in one", async () => {
-    show({ latest: null, current: null }, { ...models, models: [...models.models, gpt] });
+    show([], { ...models, models: [...models.models, gpt] });
     vi.spyOn(api, "availableModels").mockResolvedValue({ models: [] });
     const update = vi.spyOn(api, "updateModel").mockResolvedValue({ ...gpt, input_usd: 1.5 });
     const remove = vi.spyOn(api, "deleteModel").mockResolvedValue(undefined);
@@ -373,7 +441,7 @@ describe("AI analysis", () => {
   });
 
   it("lets the id be typed when the provider's models cannot be listed, and shows why a save failed", async () => {
-    show({ latest: null, current: null });
+    show([]);
     vi.spyOn(api, "availableModels").mockRejectedValue(
       new ApiError(502, "could not list the models: set OPENAI_API_KEY in .env to list the provider's models"));
     vi.spyOn(api, "addModel").mockRejectedValue(new ApiError(409, "the model 'o4' already exists"));
@@ -400,7 +468,7 @@ describe("AI analysis", () => {
   });
 
   it("says when an added model could not be deleted", async () => {
-    show({ latest: null, current: null }, { ...models, models: [...models.models, gpt] });
+    show([], { ...models, models: [...models.models, gpt] });
     vi.spyOn(api, "deleteModel").mockRejectedValue(new ApiError(404, "no such added model"));
     await screen.findByText(/No analysis yet/);
     fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
@@ -416,14 +484,16 @@ describe("AI analysis", () => {
   });
 });
 
-describe("spent", () => {
-  it("adds up the calls, and says when a model has no known price", () => {
-    expect(spent(null)).toBeNull();
-    expect(spent({ selection: null })).toBeNull();
-    expect(spent({ selection: null, analysis: { model: "claude-opus-4-8", input_tokens: 10, output_tokens: 5, cost_usd: null } }))
-      .toBe("15 tokens (10 in, 5 out) · cost unknown");
-    expect(spent({ analysis: { model: "claude-opus-5-5", input_tokens: 10, output_tokens: 5 } }))
-      .toBe("15 tokens (10 in, 5 out) · cost unknown");  // made before costs were recorded
+describe("tally", () => {
+  it("adds up the calls, with each one's cost, and says when a model has no known price", () => {
+    expect(tally(null)).toBeNull();
+    expect(tally({ selection: null })).toBeNull();
+    expect(tally(completed.usage)).toEqual(
+      { input: 11400, output: 4100, cost: "$0.128", split: "photo selection $0.022 · analysis $0.106" });
+    expect(tally({ selection: null, analysis: { model: "claude-opus-4-8", input_tokens: 10, output_tokens: 5, cost_usd: null } }))
+      .toEqual({ input: 10, output: 5, cost: "unknown", split: null });
+    expect(tally({ analysis: { model: "claude-opus-5-5", input_tokens: 10, output_tokens: 5 } }))
+      .toEqual({ input: 10, output: 5, cost: "unknown", split: null });  // made before costs were recorded
   });
 });
 

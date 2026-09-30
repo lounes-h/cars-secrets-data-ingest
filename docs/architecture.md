@@ -328,7 +328,8 @@ It lives in this repository, not in the customer-facing API and web apps, to fin
 and the model that give the best analyses for their cost. Each analysis therefore keeps what
 shaped it: its `request` (below), its tokens and cost (`usage`), and its result or failure.
 
-A person asks for it from the lot page: "Generate AI Analysis" opens a dialog that offers the
+A person asks for it from the lot page's AI Analysis section: "Generate AI Analysis"
+("Regenerate" once one has completed) opens a dialog that offers the
 built-in models of `ai.MODELS`, then those people added (`GET /api/analysis-models`: name,
 note, provider, price per million tokens, `custom` for an added one, with `AI_MODEL`
 preselected). `POST /api/lots/{source}/{lot_number}/analyses` with the chosen `model` inserts a
@@ -364,10 +365,16 @@ request's model on that provider (`vehicle_analysis.run`), one at a time:
    id; what was sent is kept either way. A worker that stops mid-analysis marks it failed on
    restart. Each change of status is a `pg_notify` event (`analysis`) that refreshes the page.
 
-Regenerating inserts a new row; nothing is overwritten. `GET .../analyses` returns the latest
-completed analysis (shown) and the latest request of any status (progress, or a failure after
-it), so a failed regeneration never hides the previous analysis. The page draws each region
-over the original photo from its normalized box.
+Regenerating inserts a new row; nothing is overwritten. `GET .../analyses` lists every analysis
+of the lot, newest first, without its photos, result or request, which keeps it light to poll
+while one runs. The section shows it as a history table (model and provider, status, photos,
+tokens, cost, time taken, who asked and when) when the lot has more than one, and shows the
+selected analysis in full from `GET .../analyses/{id}` (404 unless it belongs to that lot):
+its facts (cost per model call, tokens in and out, photos, time, prompt and schema versions),
+then its result, or for a failure its error and the request it sent. The latest completed
+analysis is selected by default, so a failed or running regeneration never hides the previous
+one; a banner says what became of the newest request. The page draws each region over the
+original photo from its normalized box.
 
 `request` keeps the analysis's settings (provider, model, prompt and schema versions, language,
 photo limits and sizes, selection thresholds) and, per model call (`selection`, `analysis`),
