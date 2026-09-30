@@ -54,8 +54,10 @@ export function LotsPage() {
             { value: "active", label: `Active (${int(counts?.active)})` },
             { value: "removed", label: `Removed (${int(counts?.removed)})` },
           ]} />
-        <button aria-pressed={favoritesOnly} onClick={() => { setFavoritesOnly(!favoritesOnly); setOffset(0); }}>
-          ★ Favorites
+        {/* A switch: while on, the list and every filter cover only favorites, so it must show. */}
+        <button className="toggle" aria-pressed={favoritesOnly}
+          onClick={() => { setFavoritesOnly(!favoritesOnly); setOffset(0); }}>
+          {favoritesOnly ? "★ Favorites only" : "☆ Favorites"}
         </button>
         <button aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
           Filters{active ? ` (${active})` : ""}
@@ -63,7 +65,11 @@ export function LotsPage() {
         {active > 0 && (
           <button className="small" onClick={() => { setFilters({}); setOffset(0); }}>Clear filters</button>
         )}
-        {lots.data && <span className="muted small match-count">{int(lots.data.total)} {lots.data.total === 1 ? "lot" : "lots"}</span>}
+        {lots.data && (
+          <span className="muted small match-count">
+            {int(lots.data.total)} {favoritesOnly && "favorite "}{lots.data.total === 1 ? "lot" : "lots"}
+          </span>
+        )}
       </div>
       {showFilters && <LotFilters value={filters} onChange={(f) => { setFilters(f); setOffset(0); }} />}
       <QueryState isLoading={lots.isLoading} error={lots.error} />

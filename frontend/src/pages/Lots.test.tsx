@@ -142,15 +142,25 @@ describe("lot list", () => {
     expect(screen.queryByText("detail page")).not.toBeInTheDocument();
   });
 
-  it("shows only favorites when asked", async () => {
+  it("shows only favorites when asked, and says so, so filters are not mistaken for all lots", async () => {
     const lots = list([]);
-    fireEvent.click(await screen.findByRole("button", { name: "★ Favorites" }));
+    vi.spyOn(api, "lotFilters").mockResolvedValue({ makes: [], damages: [], states: [], yards: [], keys: [], runs: [] });
+    fireEvent.click(await screen.findByRole("button", { name: "☆ Favorites" }));
     await waitFor(() => expect(lots).toHaveBeenLastCalledWith({
       q: "", state: "all", limit: 50, offset: 0, favorites: "true" }));
     expect(await screen.findByText(/No favorites match/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "★ Favorites" })).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(screen.getByRole("button", { name: "★ Favorites" }));
-    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({ q: "", state: "all", limit: 50, offset: 0 }));
+    const on = screen.getByRole("button", { name: "★ Favorites only" });
+    expect(on).toHaveAttribute("aria-pressed", "true");
+    expect(on).toHaveClass("toggle");  // styled as switched on
+    expect(screen.getByText("0 favorite lots")).toBeInTheDocument();
+
+    fireEvent.click(on);
+    expect(screen.getByRole("button", { name: "☆ Favorites" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.change(screen.getByLabelText("Make"), { target: { value: "HONDA" } });
+    await waitFor(() => expect(lots).toHaveBeenLastCalledWith({
+      q: "", state: "all", limit: 50, offset: 0, make: "HONDA" }));  // every lot, not only favorites
+    expect(await screen.findByText("0 lots")).toBeInTheDocument();
   });
 
   it("pages through every match, and back", async () => {
