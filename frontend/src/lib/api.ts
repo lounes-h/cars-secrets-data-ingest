@@ -167,6 +167,8 @@ export interface LotDetail {
     last_file_id: number;
     /** The lot's page on the auction site (all photos, bidding). */
     listing_url: string | null;
+    /** The price model's estimate of the final price; null until priced. */
+    predicted_final_price: string | null;
   };
   history: {
     changed_at: string;

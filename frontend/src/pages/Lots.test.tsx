@@ -238,6 +238,7 @@ describe("lot detail page", () => {
     lot: {
       ...lot, attributes: { "Lot number": "68264956", Color: "BLACK" }, first_file_id: 1,
       last_file_id: 9, listing_url: "https://www.copart.com/lot/68264956",
+      predicted_final_price: "5230.4",
     },
     history: [
       { changed_at: "2026-09-18T10:00:00Z", file_id: 8, changes: [{ field: "high_bid", old: null, new: "1500" }] },
@@ -264,6 +265,7 @@ describe("lot detail page", () => {
     expect(await screen.findByRole("heading", { name: /2013 ACURA TSX TSX TECH · lot 68264956/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View on Copart ↗" })).toHaveAttribute("href", detail.lot.listing_url);
     expect(screen.getByText("FRONT END / REAR END")).toBeInTheDocument();
+    expect(screen.getByText("Predicted price").nextSibling).toHaveTextContent("$5,230");
     expect(screen.getByRole("link", { name: "run #8" })).toHaveAttribute("href", "/runs/8");
     expect(screen.getAllByText(/∅/)).toHaveLength(2);
     expect(screen.getByText("All 2 source values")).toBeInTheDocument();
@@ -279,10 +281,12 @@ describe("lot detail page", () => {
     open({
       ...detail,
       lot: { ...detail.lot, source: "iaai", removed_at: "2026-09-19T11:00:00Z", odometer: null, favorite: true,
-        vin: null, damage_primary: null, damage_secondary: null, sale_status: null, yard_name: null },
+        vin: null, damage_primary: null, damage_secondary: null, sale_status: null, yard_name: null,
+        predicted_final_price: null },
       history: [],
     });
     expect(await screen.findByText(/^removed /)).toBeInTheDocument();
+    expect(screen.getByText("Predicted price").nextSibling).toHaveTextContent("—");
     expect(screen.getByRole("link", { name: "View on iaai ↗" })).toBeInTheDocument();
     expect(screen.getByText("Unchanged since first seen.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Favorite" })).toHaveAttribute("aria-pressed", "true");

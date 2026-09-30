@@ -569,7 +569,8 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     @api.get("/lots/{source}/{lot_number}")
     def lot_detail(source: str, lot_number: str, conn: Conn, user: User) -> dict[str, Any]:
         lot = conn.execute(
-            f"""SELECT {LOT_COLUMNS}, {IS_FAVORITE}, attributes, first_file_id, last_file_id
+            f"""SELECT {LOT_COLUMNS}, {IS_FAVORITE}, attributes, first_file_id, last_file_id,
+                       predicted_final_price
                 FROM lots WHERE source = %(source)s AND lot_number = %(lot_number)s""",
             {"source": source, "lot_number": lot_number, "user": user},
         ).fetchone()
