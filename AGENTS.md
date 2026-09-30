@@ -114,7 +114,8 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   sees the change.
 - **Price model** (`pricing.py`, see `docs/architecture.md`): XGBoost predicts each active
   lot's final price, served as `predicted_final_price` and shown on the dashboard's lot page.
-  It learns from real sale prices: `lots.final_price`, loaded from apiauctions by `apiauctions_import.py` (not a canonical column,
+  It learns from real sale prices: `lots.final_price`, loaded from apiauctions by
+  `apiauctions_import.py` (not a canonical column,
   so the loader never writes it; imported lots have no file ids, `last_file_id IS NULL`, are
   removed at their sale and never reach the API database). Copart and IAA sales train it
   together: `pricing.normalize` puts both auctions' wording into one vocabulary, the same way
