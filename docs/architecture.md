@@ -163,8 +163,9 @@ transaction.
 ## Price model
 
 `pricing.py` predicts each active lot's final auction price with XGBoost; `api_sync` serves it as
-`predicted_final_price`. It learns from real sale prices, `lots.final_price` (see the
-apiauctions import below), of Copart and IAA sales together.
+`predicted_final_price`, and the dashboard's lot page shows it ("Predicted price"). It learns
+from real sale prices, `lots.final_price` (see the apiauctions import below), of Copart and IAA
+sales together.
 
 1. `python -m ingest.pricing export [--sources copart,iaai]` writes `data/training/lots.csv.gz`
    and `data/training/test.csv.gz`: the priced lots with only the model's columns

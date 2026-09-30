@@ -170,6 +170,7 @@ export function LotDetailPage() {
             <dt>Odometer</dt><dd>{lot.odometer ? int(Number(lot.odometer)) : "—"}</dd>
             <dt>Retail value</dt><dd>{money(lot.est_retail_value, lot.currency)}</dd>
             <dt>High bid</dt><dd>{money(lot.high_bid, lot.currency)}</dd>
+            <dt>Predicted price</dt><dd>{money(lot.predicted_final_price, lot.currency)}</dd>
             <dt>Buy it now</dt><dd>{money(lot.buy_it_now_price, lot.currency)}</dd>
             <dt>Sale</dt><dd>{dateTime(lot.sale_at)} · {lot.sale_status ?? "—"}</dd>
             <dt>Yard</dt><dd>{lot.yard_name ?? "—"} ({lot.location_city}, {lot.location_state})</dd>

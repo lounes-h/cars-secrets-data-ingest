@@ -93,6 +93,11 @@ def test_overview_runs_and_lots(authed, conn, settings, make_export):
 
     lot = authed.get(f"/api/lots/copart/{lot_number}").json()
     assert lot["lot"]["listing_url"] == f"https://www.copart.com/lot/{lot_number}"
+    assert lot["lot"]["predicted_final_price"] is None  # no model file in tests
+    conn.execute("UPDATE lots SET predicted_final_price = 5230 WHERE lot_number = %s",
+                 (lot_number,))
+    assert authed.get(f"/api/lots/copart/{lot_number}").json()["lot"][
+        "predicted_final_price"] == "5230"
     (change,) = lot["history"]
     assert {"field": "high_bid_non_vix_sealed_vix", "old": "0", "new": "4242"} in change["changes"]
     assert authed.get("/api/lots/copart/0").status_code == 404
