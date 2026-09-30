@@ -3,8 +3,10 @@
 
 export type Severity = "info" | "warning" | "critical";
 export type RunStatus = "processing" | "succeeded" | "failed" | "duplicate" | "interrupted";
+export type DownloadStatus = "missed" | "skipped" | "failed" | "paused";
 
 export interface Run {
+  kind?: "file";
   id: number;
   source: string;
   filename: string;
@@ -24,6 +26,18 @@ export interface Run {
   rows_removal_deferred: number | null;
   removal_skipped: string[];
   error: string | null;
+}
+
+/** A download that delivered no file; the Runs page lists it between the ingested files. */
+export interface DownloadIssue {
+  kind: "download";
+  id: number;
+  source: string;
+  status: DownloadStatus;
+  /** When the download started, or was planned (missed). */
+  received_at: string;
+  /** Why no file came. */
+  error: string;
 }
 
 export interface RunDetail {
@@ -400,6 +414,9 @@ export const api = {
   downloadNow: () => request<Downloader>("POST", "/api/downloader/run"),
   runs: (params?: Params) =>
     request<{ items: Run[]; total: number }>("GET", withParams("/api/runs", params)),
+  /** The runs and the downloads that delivered no file, newest first. */
+  runList: (params?: Params) => request<{ items: (Run | DownloadIssue)[]; total: number }>(
+    "GET", withParams("/api/runs", { ...params, downloads: "true" })),
   run: (id: number) => request<RunDetail>("GET", `/api/runs/${id}`),
   retryRun: (id: number) => request<{ status: string; file: string }>("POST", `/api/runs/${id}/retry`),
   runRows: (id: number, params: Params) =>

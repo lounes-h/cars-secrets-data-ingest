@@ -189,7 +189,10 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `.part` rename. It runs as an always-on process (`daemon.py`, launchd `KeepAlive`, installed
   or updated by `start.sh`) that plans its own downloads, heartbeats and publishes its state to
   `downloader_status` (best effort); the dashboard's "Download now" sets `run_requested_at`,
-  which it picks up within seconds. A file lock keeps one Chrome per profile.
+  which it picks up within seconds. A file lock keeps one Chrome per profile. Every download
+  that delivers no file is written to `download_issues` (best effort): `missed` (a planned one
+  that started over 10 min late, or while the process was not running), `skipped`, `failed`,
+  `paused`. The Runs page lists them between the runs (`GET /api/runs?downloads=true`).
 
 ## Security rules
 

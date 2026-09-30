@@ -64,6 +64,12 @@ def fetch_returning(state, source_file=None):
     return fetch
 
 
+def issues(conn):
+    """What the Runs page shows for downloads that delivered no file."""
+    return [(r["status"], r["message"]) for r in conn.execute(
+        "SELECT status, message FROM download_issues ORDER BY id")]
+
+
 def open_alerts(conn):
     return {r["fingerprint"]: r for r in conn.execute(
         "SELECT * FROM alerts WHERE resolved_at IS NULL")}
@@ -174,6 +180,7 @@ def test_successful_run_delivers_to_inbox_and_clears_failure_alert(dsettings, co
     state = State.load(dsettings.state_file)
     assert state.last_success_at and state.consecutive_failures == 0
     assert cli.FP_FAILED not in open_alerts(conn)
+    assert issues(conn) == []  # a delivered file shows as its ingest run
 
 
 def test_runs_are_paced_even_if_scheduled_too_often(dsettings, conn):
@@ -183,6 +190,8 @@ def test_runs_are_paced_even_if_scheduled_too_often(dsettings, conn):
     clock.at = T0 + timedelta(minutes=10)
     assert cli.run_once(dsettings, now=clock, fetch=fetch) == cli.SKIPPED
     assert len(fetch.calls) == 1
+    assert issues(conn) == [
+        ("skipped", "Too soon after the last attempt; the next one is allowed in 35 min")]
     assert cli.run_once(dsettings, now=clock, fetch=fetch, force=True) == cli.OK
     assert len(fetch.calls) == 2
 
@@ -199,6 +208,10 @@ def test_challenge_pauses_until_a_person_logs_in(dsettings, conn, monkeypatch):
     clock.at = T0 + timedelta(hours=5)
     assert cli.run_once(dsettings, now=clock, fetch=fetch, force=True) == cli.NEEDS_PERSON
     assert len(fetch.calls) == 1
+    assert issues(conn) == [
+        ("paused", "Copart showed a verification/blocking page: downloads paused until you log "
+                   "in again"),
+        ("skipped", "Downloads are paused until someone runs login")]
 
     # The person logs in: alert resolved, downloads resume.
     import ingest.downloader.browser as browser
@@ -278,6 +291,7 @@ def test_repeated_errors_back_off_and_escalate(dsettings, conn):
     alert = open_alerts(conn)[cli.FP_FAILED]
     assert alert["severity"] == "critical" and alert["occurrences"] == 3
     assert "TimeoutError" in alert["title"]
+    assert issues(conn) == [("failed", "TimeoutError: page did not load")] * 3
     # without --force the backoff (4 h after the 3rd failure) is respected
     assert cli.run_once(dsettings, now=clock, fetch=broken) == cli.SKIPPED
 
@@ -432,6 +446,7 @@ def test_only_one_process_uses_the_chrome_profile(dsettings, conn):
         fetch = fetch_returning(PageState.READY, SAMPLE)
         assert cli.run_locked(dsettings, force=True, fetch=fetch) == cli.BUSY
         assert fetch.calls == []  # Chrome never started
+        assert issues(conn) == [("skipped", "Another download or a login was using Chrome")]
     assert cli.run_locked(dsettings, force=True, now=Clock(),
                           fetch=fetch_returning(PageState.READY, SAMPLE)) == cli.OK
 
@@ -482,6 +497,7 @@ def test_a_dashboard_database_that_is_down_never_fails_the_downloader(tmp_path):
                                   database_url="postgresql://nobody@127.0.0.1:1/none")
     cli.save(settings, State())  # logged, not raised
     cli.notify(settings, None, resolve=(cli.FP_FAILED,))
+    cli.record(settings, "failed", T0, "boom")
     assert State.load(settings.state_file) == State()
 
 
@@ -532,5 +548,7 @@ def test_daemon_wires_the_process_to_the_database_and_stops_on_sigterm(dsettings
     daemon.publish(State(), heartbeat=True)
     assert daemon.read_request() is None
     daemon.clear_request(T0)
+    daemon.report("missed", T0, "asleep")
+    assert issues(conn) == [("missed", "asleep")]
     handlers[cli.signal.SIGTERM]()
     assert stop.is_set()

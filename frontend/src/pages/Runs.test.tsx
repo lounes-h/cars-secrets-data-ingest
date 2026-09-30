@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { vi } from "vitest";
 import { ToastProvider } from "../components/Toasts";
-import { api, type Run, type RunDetail, type RunLot, type RunRows } from "../lib/api";
+import { api, type DownloadIssue, type Run, type RunDetail, type RunLot, type RunRows } from "../lib/api";
 import { RunDetailPage, RunsPage } from "./Runs";
 
 const detail: RunDetail = {
@@ -192,9 +192,9 @@ it("says so when a run rejected no row or removed no lot", async () => {
 });
 
 describe("runs list", () => {
-  function list(items: Run[], total = items.length) {
+  function list(items: (Run | DownloadIssue)[], total = items.length) {
     vi.spyOn(api, "downloader").mockResolvedValue({ installed: false, status: "not_installed" });
-    const runs = vi.spyOn(api, "runs").mockResolvedValue({ items, total });
+    const runs = vi.spyOn(api, "runList").mockResolvedValue({ items, total });
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter initialEntries={["/runs"]}>
@@ -216,6 +216,23 @@ describe("runs list", () => {
     await waitFor(() => expect(runs).toHaveBeenLastCalledWith({ status: "failed", limit: 50, offset: 0 }));
     fireEvent.click(await screen.findByText("export.csv"));
     expect(await screen.findByText("run page")).toBeInTheDocument();
+  });
+
+  it("lists downloads that delivered no file between the runs, without a run page", async () => {
+    const runs = list([
+      { ...detail.run, kind: "file" },
+      { kind: "download", id: 42, source: "copart", status: "missed",
+        received_at: "2026-09-19T11:00:00Z",
+        error: "Not downloaded at the planned time: the Mac was asleep." },
+    ]);
+    const message = await screen.findByText("Not downloaded at the planned time: the Mac was asleep.");
+    expect(screen.getByText("No file:")).toBeInTheDocument();
+    expect(screen.getByText("missed")).toBeInTheDocument();
+    expect(screen.getAllByRole("link")).toHaveLength(1);  // only the file's run opens a page
+    fireEvent.click(message);
+    expect(screen.queryByText("run page")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Missed" }));
+    await waitFor(() => expect(runs).toHaveBeenLastCalledWith({ status: "missed", limit: 50, offset: 0 }));
   });
 
   it("says when there are no runs", async () => {

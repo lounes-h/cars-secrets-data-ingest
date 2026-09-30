@@ -30,7 +30,7 @@ class Harness:
     def __init__(self, tmp_path, *, run_result=0, run_error=None):
         self.settings = DownloaderSettings(_env_file=None, state_file=tmp_path / "state.json")
         self.clock = Clock()
-        self.runs, self.published, self.cleared = [], [], []
+        self.runs, self.published, self.cleared, self.reports = [], [], [], []
         self.request = None
         self.run_error = run_error
 
@@ -48,6 +48,7 @@ class Harness:
             publish=lambda state, **kw: self.published.append((State(**vars(state)), kw)),
             read_request=lambda: self.request,
             clear_request=lambda at: (self.cleared.append(at), setattr(self, "request", None)),
+            report=lambda *issue: self.reports.append(issue),
             clock=self.clock, rng=random.Random(1),
         )
 
@@ -99,6 +100,7 @@ def test_downloads_when_due_then_plans_an_hour_later(tmp_path):
     assert state.activity == "idle"
     assert state.next_run_at == (T0 + timedelta(minutes=90)).isoformat()
     assert any(p[0].activity == "downloading" for p in h.published)  # shown while running
+    assert h.reports == []  # on time: nothing missed
 
 
 def test_download_now_request_runs_immediately_and_is_cleared(tmp_path):
@@ -175,6 +177,29 @@ def test_catches_up_after_sleep_once_the_network_had_a_minute(tmp_path):
     h.clock.advance(seconds=31)
     h.daemon.tick()
     assert len(h.runs) == 1  # one catch-up download, not one per missed hour
+    assert h.reports == [("missed", T0 + HOUR, "Not downloaded at the planned time: the Mac was "
+                          "asleep. The download started 2 h 1 min late.")]
+
+
+def test_a_late_download_while_awake_is_reported_as_stuck(tmp_path):
+    h = Harness(tmp_path)
+    h.daemon.start()
+    State(next_run_at=(T0 - timedelta(minutes=25)).isoformat()).save(h.settings.state_file)
+    h.daemon.tick()
+    assert h.reports == [("missed", T0 - timedelta(minutes=25), "Not downloaded at the planned "
+                          "time: the downloader was stuck, see its log. The download started "
+                          "25 min late.")]
+
+
+@pytest.mark.parametrize("late, reported", [(timedelta(hours=3), True),
+                                            (timedelta(minutes=2), False)])
+def test_a_plan_missed_while_the_downloader_was_not_running(tmp_path, late, reported):
+    h = Harness(tmp_path)
+    State(next_run_at=(T0 - late).isoformat()).save(h.settings.state_file)
+    h.daemon.start()
+    assert h.reports == ([("missed", T0 - late, "Not downloaded at the planned time: the "
+                           "downloader was not running (Mac off or logged out). It was back "
+                           "3 h 0 min later.")] if reported else [])
 
 
 def test_heartbeat_every_30_seconds_while_idle(tmp_path):
@@ -197,6 +222,7 @@ def test_a_crashing_download_does_not_stop_the_process(tmp_path):
     assert len(h.runs) == 1
     state = h.state()
     assert state.activity == "idle" and state.next_run_at is not None
+    assert h.reports == [("failed", T0, "The download crashed: RuntimeError: chrome crashed")]
 
 
 def test_serve_stops_cleanly_and_clears_the_heartbeat(tmp_path):

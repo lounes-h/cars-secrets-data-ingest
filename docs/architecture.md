@@ -45,6 +45,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | Table | Holds |
 |---|---|
 | `ingest_files` | One row per file received: status, counts, removed lot numbers, duration, header, error, archive path |
+| `download_issues` | One row per download that delivered no file, written by the downloader: `missed` (the Mac slept through the planned time, or the downloader was not running), `skipped` (pacing, paused, Chrome busy), `failed`, `paused`, with when and why |
 | `lots` | Current state per `(source, lot_number)`: typed canonical columns + `attributes` JSONB (every source column) + `row_hash`, `first_seen_at`, `last_seen_at`, `last_changed_at`, `removed_at`, `sync_version`, the price prediction (`predicted_final_price`, `prediction_model`, `predicted_version`), and the price it sold for (`final_price`, from apiauctions) |
 | `lot_versions` | Previous versions of changed lots (`valid_from`/`valid_to`, attributes, superseding file) |
 | `column_registry` | Every column per provider: source header, mapping, `active`/`missing`, first/last seen |
@@ -282,6 +283,12 @@ Imported lots count in the dashboard's All and Removed totals and show on the Lo
 database never gets them (removed long before the sync's 4 h window).
 
 ## What a run did
+
+`GET /api/runs` lists the ingested files, newest first (the Overview's charts read it). With
+`downloads=true`, which the Runs page sends, it also lists the downloads that delivered no
+file (`download_issues`), as `kind: "download"` rows holding `status`, `received_at` (when the
+download started or was planned) and `error` (why no file came), so a gap between two files
+says what happened. They have no run page.
 
 `GET /api/runs/{run_id}` returns the run and its alerts only: an export can create, change or
 remove six figures of lots, so the four lists are paged separately by

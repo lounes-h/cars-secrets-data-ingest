@@ -303,16 +303,29 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         conn: Conn, source: str | None = None,
         status_: Annotated[str | None, Query(alias="status")] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
+        downloads: bool = False,
     ) -> dict[str, Any]:
+        """Ingested files, newest first; with `downloads`, also the downloads that delivered no
+        file (missed, skipped, failed, paused: `download_issues`), as `kind` 'download' rows."""
         where = "WHERE (%(source)s::text IS NULL OR source = %(source)s) " \
                 "AND (%(status)s::text IS NULL OR status = %(status)s)"
-        params = {"source": source, "status": status_, "limit": limit, "offset": offset}
+        params = {"source": source, "status": status_, "end": offset + limit}
         items = conn.execute(
-            f"SELECT {RUN_COLUMNS} FROM ingest_files {where} "
-            "ORDER BY id DESC LIMIT %(limit)s OFFSET %(offset)s", params,
+            f"SELECT 'file' AS kind, {RUN_COLUMNS} FROM ingest_files {where} "
+            "ORDER BY id DESC LIMIT %(end)s", params,
         ).fetchall()
-        total = conn.execute(f"SELECT count(*) AS n FROM ingest_files {where}", params).fetchone()
-        return {"items": items, "total": total["n"]}
+        total = conn.execute(
+            f"SELECT count(*) AS n FROM ingest_files {where}", params).fetchone()["n"]
+        if downloads:
+            items += conn.execute(
+                "SELECT 'download' AS kind, id, source, status, at AS received_at, "
+                f"message AS error FROM download_issues {where} "
+                "ORDER BY at DESC, id DESC LIMIT %(end)s", params,
+            ).fetchall()
+            total += conn.execute(
+                f"SELECT count(*) AS n FROM download_issues {where}", params).fetchone()["n"]
+            items.sort(key=lambda r: r["received_at"], reverse=True)
+        return {"items": items[offset:offset + limit], "total": total}
 
     @api.get("/runs/{run_id}")
     def run_detail(run_id: int, conn: Conn) -> dict[str, Any]:

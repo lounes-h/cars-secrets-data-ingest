@@ -212,6 +212,27 @@ def test_retry_moves_failed_file_back_to_inbox(authed, conn, settings, make_expo
     assert authed.post(f"/api/runs/{outcome.file_id}/retry").status_code == 409
 
 
+def test_runs_list_downloads_that_delivered_no_file(authed, conn):
+    conn.execute("""INSERT INTO ingest_files (source, filename, sha256, status, received_at)
+                    VALUES ('copart', 'a.csv', 'a', 'succeeded', '2026-09-30 13:55Z'),
+                           ('copart', 'b.csv', 'b', 'failed', '2026-09-30 16:33Z')""")
+    conn.execute("""INSERT INTO download_issues (source, status, at, message)
+                    VALUES ('copart', 'missed', '2026-09-30 14:57Z', 'the Mac was asleep'),
+                           ('copart', 'failed', '2026-09-30 12:00Z', 'TimeoutError')""")
+    assert authed.get("/api/runs").json()["total"] == 2  # files only, for the Overview's charts
+
+    runs = authed.get("/api/runs", params={"downloads": "true"}).json()
+    assert runs["total"] == 4
+    assert [(r["kind"], r["status"]) for r in runs["items"]] == [
+        ("file", "failed"), ("download", "missed"), ("file", "succeeded"), ("download", "failed")]
+    assert runs["items"][1]["error"] == "the Mac was asleep"
+    page = authed.get("/api/runs", params={"downloads": "true", "limit": 2, "offset": 1}).json()
+    assert [r["status"] for r in page["items"]] == ["missed", "succeeded"]
+    failed = authed.get("/api/runs", params={"downloads": "true", "status": "failed"}).json()
+    assert failed["total"] == 2
+    assert [r["kind"] for r in failed["items"]] == ["file", "download"]
+
+
 def test_retry_refuses_non_failed_runs(authed, conn, settings, make_export):
     outcome = process_file(conn, make_export(), COPART, settings)
     assert authed.post(f"/api/runs/{outcome.file_id}/retry").status_code == 409
