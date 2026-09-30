@@ -420,7 +420,7 @@ def test_request_run_and_regenerate_through_the_api(authed, conn, settings, lot,
     url = f"/api/lots/copart/{lot.number}/analyses"
     lot.photos["https://cs.copart.com/a_ful.jpg"] = jpeg()
     lot.photos["https://cs.copart.com/b_ful.jpg"] = jpeg()
-    assert authed.get(url).json() == {"latest": None, "current": None}
+    assert authed.get(url).json() == {"analyses": []}
 
     queued = authed.post(url)
     assert queued.status_code == 202
@@ -429,24 +429,31 @@ def test_request_run_and_regenerate_through_the_api(authed, conn, settings, lot,
     again = authed.post(url, json={"language": "en"})
     assert (again.status_code, again.json()["detail"]) == (
         409, "an analysis of this lot is already in progress")
-    assert authed.get(url).json()["current"]["status"] == "queued"
+    assert [a["status"] for a in authed.get(url).json()["analyses"]] == ["queued"]
 
     FakeAI(monkeypatch)
     va.process_next(conn, settings)
-    body = authed.get(url).json()
-    assert body["latest"]["id"] == body["current"]["id"] == queued.json()["id"]
-    assert body["latest"]["result"]["language"] == "en"
-    assert body["latest"]["images"][0]["full"] == "https://cs.copart.com/a_ful.jpg"
-    assert body["latest"]["usage"]["analysis"]["output_tokens"] == 5
+    first = queued.json()["id"]
+    [listed] = authed.get(url).json()["analyses"]
+    assert (listed["id"], listed["status"]) == (first, "completed")
+    assert listed["usage"]["analysis"]["output_tokens"] == 5
+    # the history leaves out what only the analysis itself shows
+    assert not {"images", "result", "request"} & listed.keys()
+    full = authed.get(f"{url}/{first}").json()
+    assert full["result"]["language"] == "en"
+    assert full["images"][0]["full"] == "https://cs.copart.com/a_ful.jpg"
+    assert full["request"]["settings"]["model"] == "claude-opus-5-5"
 
-    # a failed regeneration leaves the completed analysis in place
+    # a failed regeneration adds to the history; the completed analysis stays in it
     assert authed.post(url).status_code == 202
     FakeAI(monkeypatch, analysis=ai.AIError("the AI request failed: APITimeoutError"))
     va.process_next(conn, settings)
-    body = authed.get(url).json()
-    assert body["latest"]["id"] == queued.json()["id"]
-    assert body["current"]["status"] == "failed"
-    assert "APITimeoutError" in body["current"]["error"]
+    failed, completed = authed.get(url).json()["analyses"]
+    assert (completed["id"], completed["status"]) == (first, "completed")
+    assert failed["status"] == "failed" and "APITimeoutError" in failed["error"]
+    # a failure keeps, and shows, what shaped it too
+    assert authed.get(f"{url}/{failed['id']}").json()["request"]["settings"]["model"] == (
+        "claude-opus-5-5")
     assert conn.execute("SELECT count(*) AS n FROM vehicle_analyses").fetchone()["n"] == 2
 
 
@@ -469,7 +476,7 @@ def test_the_model_chosen_for_a_request_runs_it(authed, conn, settings, lot, mon
         "claude-sonnet-5-5")
     FakeAI(monkeypatch)
     va.process_next(conn, settings)
-    latest = authed.get(url).json()["latest"]
+    latest = authed.get(f"{url}/{authed.get(url).json()['analyses'][0]['id']}").json()
     assert latest["model"] == "claude-sonnet-5-5"
     assert latest["usage"]["analysis"]["model"] == "claude-sonnet-5-5"  # the model that ran
     assert settings.ai_model == "claude-opus-5-5"  # the worker's own settings are untouched
@@ -477,12 +484,19 @@ def test_the_model_chosen_for_a_request_runs_it(authed, conn, settings, lot, mon
 
 def test_analysis_requests_are_checked(authed, lot):
     assert authed.get("/api/lots/copart/0/analyses").status_code == 404
+    queued = authed.post(f"/api/lots/copart/{lot.number}/analyses").json()["id"]
+    assert authed.get(f"/api/lots/copart/{lot.number}/analyses/{queued}").status_code == 200
+    # an analysis is only found under its own lot
+    other = authed.get(f"/api/lots/copart/0/analyses/{queued}")
+    assert (other.status_code, other.json()["detail"]) == (404, "analysis not found")
+    assert authed.get(f"/api/lots/copart/{lot.number}/analyses/{queued + 1}").status_code == 404
     assert authed.post("/api/lots/copart/0/analyses").status_code == 404
     refused = authed.post(f"/api/lots/copart/{lot.number}/analyses", json={"language": "xx"})
     assert (refused.status_code, refused.json()["detail"]) == (422, "unsupported language 'xx'")
     authed.post("/api/auth/logout")
     authed.cookies.clear()
     assert authed.get(f"/api/lots/copart/{lot.number}/analyses").status_code == 401
+    assert authed.get(f"/api/lots/copart/{lot.number}/analyses/{queued}").status_code == 401
     assert authed.post(f"/api/lots/copart/{lot.number}/analyses").status_code == 401
 
 
@@ -555,7 +569,7 @@ def test_an_added_model_runs_on_its_provider_at_its_price(authed, conn, settings
 
     monkeypatch.setitem(ai.CLIENTS, "openai", fake_openai)
     va.process_next(conn, settings)
-    latest = authed.get(url).json()["latest"]
+    latest = authed.get(f"{url}/{queued['id']}").json()
     assert (latest["provider"], latest["model"]) == ("openai", "gpt-5.6")
     assert latest["request"]["settings"]["provider"] == "openai"
     assert latest["usage"]["analysis"]["cost_usd"] == 2.8  # 1M x $2 + 100k x $8
@@ -564,7 +578,7 @@ def test_an_added_model_runs_on_its_provider_at_its_price(authed, conn, settings
     authed.delete("/api/analysis-models/gpt-5.6")
     conn.execute("UPDATE vehicle_analyses SET status = 'queued'")
     va.process_next(conn, settings)
-    assert authed.get(url).json()["latest"]["usage"]["analysis"]["cost_usd"] is None
+    assert authed.get(url).json()["analyses"][0]["usage"]["analysis"]["cost_usd"] is None
 
 
 def test_the_providers_models_are_offered_to_add(authed, monkeypatch):

@@ -326,11 +326,12 @@ export interface AnalysisModel {
 
 export type AddedModel = Omit<AnalysisModel, "custom">;
 
+/** An analysis in a lot's history: all but its photos, result and request. */
+export type AnalysisSummary = Omit<VehicleAnalysis, "images" | "result" | "request">;
+
 export interface LotAnalyses {
-  /** The latest completed analysis, shown on the lot page. */
-  latest: VehicleAnalysis | null;
-  /** The latest request, whatever its status: in progress, or failed after `latest`. */
-  current: VehicleAnalysis | null;
+  /** Every analysis of the lot, newest first, whatever its status. */
+  analyses: AnalysisSummary[];
 }
 
 export type DownloaderStatus =
@@ -422,6 +423,9 @@ export const api = {
   lotAnalyses: (source: string, lotNumber: string) =>
     request<LotAnalyses>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`),
+  lotAnalysis: (source: string, lotNumber: string, id: number) =>
+    request<VehicleAnalysis>(
+      "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses/${id}`),
   analysisModels: () => request<{ default: string; models: AnalysisModel[] }>("GET", "/api/analysis-models"),
   availableModels: (provider: string) =>
     request<{ models: { id: string; label: string }[] }>("GET", withParams("/api/analysis-models/available", { provider })),

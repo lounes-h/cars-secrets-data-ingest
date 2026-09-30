@@ -144,7 +144,10 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   others); the worker runs it with that model, stamped with its provider (an added model's, else
   `AI_PROVIDER`)/`AI_PROMPT_VERSION`/`AI_SCHEMA_VERSION`, and keeps what it sent and got back,
   success or not. Regenerating adds
-  a row, never overwrites one. At most `AI_MAX_IMAGES` (5) photos go to the model, shrunk to
+  a row, never overwrites one; the lot page's AI Analysis section lists every analysis of the lot
+  (`GET …/analyses`, without photos, result or request) with its model, tokens, cost and time, and
+  shows the one selected there in full (`GET …/analyses/{id}`), by default the latest completed
+  one, so a failed regeneration hides nothing. At most `AI_MAX_IMAGES` (5) photos go to the model, shrunk to
   `AI_IMAGE_MAX_PX` (1024), renamed `image_01` …; with more photos than that, the model first
   picks them from 384 px copies. An answer is `completed` only if it passes `AnalysisV1`
   (schema and every cross-reference: regions mark observed damage on a photo it cites; hidden
@@ -338,7 +341,8 @@ A code change is not considered complete until the relevant unit tests have been
   $752, half the lots within 31 % of their price, R² 0.73, against $2,099 / 0.47 for the
   synthetic model it replaced (kept as `data/models/final_price-synthetic.ubj`). IAA sales
   neither help nor hurt Copart prices (Copart only: MAE $1,577).
-- AI damage analysis built (2026-09-28): "Generate AI Analysis" on the lot page, Claude Opus
+- AI damage analysis built (2026-09-28): "Generate AI Analysis" in the lot page's AI Analysis
+  section, above its history of every analysis of the lot (2026-09-29), Claude Opus
   5.5, prompt `vehicle-damage-v1`, schema 1.0, English. Tested against a fake model only: it
   needs `ANTHROPIC_API_KEY` in `.env`, and its accuracy on real lots is not measured yet. It
   sends Copart photos to Anthropic, which the Copart license question above also covers.
