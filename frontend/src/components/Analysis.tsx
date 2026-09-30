@@ -301,10 +301,10 @@ function SentMessage({ content }: { content: SentContent[] }) {
   for (let i = 0; i < content.length; i++) {
     const block = content[i];
     const next = content[i + 1];
-    if (block.type === "text" && next?.type === "image") {
+    if ("text" in block && next && "bytes" in next) {
       blocks.push(<div key={i} className="mono small">{block.text}: JPEG photo, {bytes(next.bytes)}</div>);
       i++;
-    } else if (block.type === "text") {
+    } else if ("text" in block) {
       blocks.push(<pre key={i} className="prompt">{block.text}</pre>);
     } else {
       blocks.push(<div key={i} className="mono small">JPEG photo, {bytes(block.bytes)}</div>);
@@ -314,17 +314,20 @@ function SentMessage({ content }: { content: SentContent[] }) {
 }
 
 function SentCall({ title, sent }: { title: string; sent: SentRequest }) {
-  const { system, messages, output_config: { format, ...output }, ...params } = sent;
-  const photos = messages[0].content.filter((b) => b.type === "image").length;
+  // Anthropic's shape, or OpenAI's (see SentRequest)
+  const { system, instructions, messages, input, output_config, text, ...params } = sent;
+  const { format, ...output } = (output_config ?? text)!;
+  const content = (messages ?? input)![0].content;
+  const photos = content.filter((b) => "bytes" in b).length;
   return (
     <details className="sent-call">
       <summary>{title} · {sent.model} · {photos} photos</summary>
       <h5>Parameters</h5>
-      <pre>{JSON.stringify({ ...params, output_config: { ...output, format: format.type } }, null, 2)}</pre>
+      <pre>{JSON.stringify({ ...params, [output_config ? "output_config" : "text"]: { ...output, format: format.type } }, null, 2)}</pre>
       <h5>System prompt</h5>
-      <pre className="prompt">{system}</pre>
+      <pre className="prompt">{system ?? instructions}</pre>
       <h5>User message</h5>
-      <SentMessage content={messages[0].content} />
+      <SentMessage content={content} />
       <details>
         <summary className="small">Output schema ({format.type})</summary>
         <pre>{JSON.stringify(format.schema, null, 2)}</pre>

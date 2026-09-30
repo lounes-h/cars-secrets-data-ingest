@@ -256,17 +256,26 @@ export interface AIUsage {
   cost_usd?: number | null;
 }
 
-/** One block of a message as sent to the model; photos are recorded by their size. */
+/** One block of a message as sent to the model (Anthropic's type, or OpenAI's `input_*`);
+ * photos are recorded by their size. */
 export type SentContent =
-  | { type: "text"; text: string }
-  | { type: "image"; media_type: string; bytes: number };
+  | { type: "text" | "input_text"; text: string }
+  | { type: "image" | "input_image"; media_type: string; bytes: number; detail?: string };
 
-/** A model call's request as sent: parameters, system prompt, message, output schema. */
+type SentOutput = { format: { type: string; schema: unknown; [key: string]: unknown }; [key: string]: unknown };
+type SentMessages = { role: string; content: SentContent[] }[];
+
+/** A model call's request as its client sent it: parameters, system prompt, message, output
+ * schema. Anthropic's: `system`, `messages`, `output_config`; OpenAI's: `instructions`,
+ * `input`, `text`. */
 export interface SentRequest {
   model: string;
-  system: string;
-  output_config: { format: { type: string; schema: unknown }; [key: string]: unknown };
-  messages: { role: string; content: SentContent[] }[];
+  system?: string;
+  instructions?: string;
+  output_config?: SentOutput;
+  text?: SentOutput;
+  messages?: SentMessages;
+  input?: SentMessages;
   [key: string]: unknown;
 }
 

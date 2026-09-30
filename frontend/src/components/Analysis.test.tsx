@@ -173,6 +173,35 @@ describe("AI analysis", () => {
       .toHaveTextContent('"additionalProperties": false');
   });
 
+  it("shows an OpenAI call as its client recorded it (instructions, input, text format)", async () => {
+    const openai: SentRequest = {
+      model: "gpt-6.1-sol", max_output_tokens: 32000, instructions: "You are a senior vehicle damage appraiser.",
+      reasoning: { effort: "high" }, timeout_seconds: 300,
+      text: { format: { type: "json_schema", name: "AnalysisV1", strict: true, schema: { type: "object", additionalProperties: false } } },
+      input: [{
+        role: "user", content: [
+          { type: "input_text", text: "Auction metadata:\n{\"make\": \"ACURA\"}" },
+          { type: "input_text", text: "image_01" }, { type: "input_image", media_type: "image/jpeg", bytes: 120832, detail: "high" },
+        ],
+      }],
+    };
+    const ran = { ...completed, provider: "openai", model: "gpt-6.1-sol",
+      request: { settings: { provider: "openai", model: "gpt-6.1-sol" }, analysis: openai } };
+    show({ latest: ran, current: ran });
+    const call = (await screen.findByText("Analysis call · gpt-6.1-sol · 1 photos")).closest("details")!;
+    expect(within(call).getByText("You are a senior vehicle damage appraiser.")).toBeInTheDocument();
+    expect(within(call).getByText(/Auction metadata: \{"make": "ACURA"\}/)).toBeInTheDocument();
+    expect(within(call).getByText("image_01: JPEG photo, 118.0 KB")).toBeInTheDocument();
+    const params = within(call).getByText("Parameters").nextElementSibling!;
+    expect(params).toHaveTextContent('"effort": "high"');
+    expect(params).toHaveTextContent('"format": "json_schema"');
+    expect(params).toHaveTextContent('"max_output_tokens": 32000');
+    expect(params).not.toHaveTextContent("senior vehicle damage appraiser");
+    expect(params).not.toHaveTextContent("additionalProperties");
+    expect(within(call).getByText("Output schema (json_schema)").closest("details"))
+      .toHaveTextContent('"additionalProperties": false');
+  });
+
   it("marks damage on the original photos and explains a marked area on hover or click", async () => {
     show({ latest: completed, current: completed });
     const box = await screen.findByRole("button", { name: "Front bumper damage, 90% confidence" });
