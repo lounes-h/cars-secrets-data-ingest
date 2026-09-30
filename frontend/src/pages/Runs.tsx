@@ -5,12 +5,13 @@ import { NextDownload } from "../components/NextDownload";
 import { useToast } from "../components/Toasts";
 import { Pager, QueryState, RunStatusBadge, Segmented, SeverityBadge } from "../components/ui";
 import {
-  api, type RejectedRow, type RunDetail, type RunLot, type RunRowKind, type RunStatus,
+  api, type DownloadStatus, type RejectedRow, type RunDetail, type RunLot, type RunRowKind,
+  type RunStatus,
 } from "../lib/api";
 import { bytes, dateTime, duration, int } from "../lib/format";
 
 const LIMIT = 50;
-type StatusFilter = "" | RunStatus;
+type StatusFilter = "" | RunStatus | DownloadStatus;
 
 export function RunsPage() {
   const navigate = useNavigate();
@@ -18,7 +19,7 @@ export function RunsPage() {
   const [offset, setOffset] = useState(0);
   const q = useQuery({
     queryKey: ["runs", status, offset],
-    queryFn: () => api.runs({ status, limit: LIMIT, offset }),
+    queryFn: () => api.runList({ status, limit: LIMIT, offset }),
   });
 
   return (
@@ -31,7 +32,8 @@ export function RunsPage() {
           options={[
             { value: "", label: "All" }, { value: "succeeded", label: "Succeeded" },
             { value: "failed", label: "Failed" }, { value: "duplicate", label: "Duplicate" },
-            { value: "interrupted", label: "Interrupted" },
+            { value: "interrupted", label: "Interrupted" }, { value: "missed", label: "Missed" },
+            { value: "skipped", label: "Skipped" }, { value: "paused", label: "Paused" },
           ]} />
       </div>
       <QueryState isLoading={q.isLoading} error={q.error} />
@@ -47,7 +49,16 @@ export function RunsPage() {
                 </tr>
               </thead>
               <tbody>
-                {q.data.items.map((r) => (
+                {q.data.items.map((r) => r.kind === "download" ? (
+                  <tr key={`download-${r.id}`}>
+                    <td className="muted">—</td>
+                    <td>{r.source}</td>
+                    <td className="wrap-anywhere"><span className="muted">No file: </span>{r.error}</td>
+                    <td><RunStatusBadge status={r.status} /></td>
+                    <td>{dateTime(r.received_at)}</td>
+                    <td colSpan={6} />
+                  </tr>
+                ) : (
                   <tr key={r.id} className="clickable" onClick={() => navigate(`/runs/${r.id}`)}>
                     <td><Link to={`/runs/${r.id}`}>{r.id}</Link></td>
                     <td>{r.source}</td>

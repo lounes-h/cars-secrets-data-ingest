@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { RunStatus, Severity } from "../lib/api";
+import type { DownloadStatus, RunStatus, Severity } from "../lib/api";
 
 type Tone = "critical" | "warning" | "info" | "good" | "neutral";
 
@@ -62,15 +62,18 @@ export function SeverityBadge({ severity }: { severity: Severity }) {
   return <Badge tone={severity}>{label}</Badge>;
 }
 
-const RUN_TONE: Record<RunStatus, Tone> = {
+const RUN_TONE: Record<RunStatus | DownloadStatus, Tone> = {
   succeeded: "good",
   failed: "critical",
   duplicate: "info",
   interrupted: "warning",
   processing: "neutral",
+  missed: "warning",
+  skipped: "neutral",
+  paused: "critical",
 };
 
-export function RunStatusBadge({ status }: { status: RunStatus }) {
+export function RunStatusBadge({ status }: { status: RunStatus | DownloadStatus }) {
   return <Badge tone={RUN_TONE[status]}>{status}</Badge>;
 }
 

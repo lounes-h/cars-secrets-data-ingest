@@ -22,6 +22,10 @@ describe("queriesFor", () => {
     expect(queriesFor({ type: "analysis" })).toEqual([["lot-analysis"]]);
   });
 
+  it("refreshes the runs list when a download delivered no file", () => {
+    expect(queriesFor({ type: "download_issue" })).toEqual([["runs"]]);
+  });
+
   it("refreshes the downloader card on downloader events, and the overview on anything else", () => {
     expect(queriesFor({ type: "downloader" })).toEqual([["downloader"], ["overview"]]);
     expect(queriesFor({ type: "unknown" as never })).toEqual([["overview"]]);

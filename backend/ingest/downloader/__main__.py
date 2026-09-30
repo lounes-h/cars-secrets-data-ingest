@@ -63,6 +63,22 @@ def notify(settings: DownloaderSettings, spec: AlertSpec | None, resolve: tuple[
         log.exception("downloader.alert_failed")
 
 
+def record(settings: DownloaderSettings, status: str, at: datetime, message: str) -> None:
+    """Keep a download that delivered no file (missed, skipped, failed, paused) for the Runs
+    page, where delivered files show as ingest runs. Best effort, like notify."""
+    url = settings.db_url
+    if not url:
+        return
+    try:
+        with connect(url) as conn:
+            conn.execute(
+                "INSERT INTO download_issues (source, status, at, message) VALUES (%s, %s, %s, %s)",
+                (SOURCE, status, at, message))
+            notify_event(conn, "download_issue", source=SOURCE, status=status)
+    except Exception:  # noqa: BLE001
+        log.exception("downloader.record_failed")
+
+
 def save(
     settings: DownloaderSettings, state: State, *, heartbeat: bool = False,
     started_at: datetime | None = None, stopped: bool = False,
@@ -134,6 +150,8 @@ def run_locked(settings: DownloaderSettings, *, force: bool, **kwargs) -> int:
     with download_lock(settings.lock_file) as acquired:
         if not acquired:
             log.warning("downloader.busy", hint="a download or login is already in progress")
+            record(settings, "skipped", datetime.now(UTC),
+                   "Another download or a login was using Chrome")
             return BUSY
         return run_once(settings, force=force, **kwargs)
 
@@ -153,9 +171,13 @@ def run_once(
     if allowed is None:
         log.warning("downloader.waiting_for_login", reason=state.needs_attention,
                     hint="run: python -m ingest.downloader login")
+        record(settings, "skipped", now(), "Downloads are paused until someone runs login")
         return NEEDS_PERSON
     if not force and now() < allowed:
         log.info("downloader.skipped", next_attempt=allowed.isoformat())
+        wait = round((allowed - now()).total_seconds() / 60)
+        record(settings, "skipped", now(),
+               f"Too soon after the last attempt; the next one is allowed in {wait} min")
         return SKIPPED
 
     started = now()
@@ -205,6 +227,8 @@ def _pause(settings: DownloaderSettings, state: State, page_state: PageState, wh
     saved login that keeps failing must not lock the account."""
     state.needs_attention = page_state.value
     save(settings, state)
+    record(settings, "paused", datetime.fromisoformat(state.last_attempt_at),
+           f"{what}: downloads paused until you log in again")
     notify(settings, AlertSpec(
         "critical", "downloader_attention",
         f"{what}: downloads paused until you log in again",
@@ -221,6 +245,7 @@ def _failed(settings: DownloaderSettings, state: State, error: str) -> int:
     retry = next_allowed_attempt(state, settings)
     log.error("downloader.failed", error=error, failures=state.consecutive_failures,
               next_attempt=retry.isoformat() if retry else None)
+    record(settings, "failed", datetime.fromisoformat(state.last_attempt_at), error)
     notify(settings, AlertSpec(
         "critical" if state.consecutive_failures >= 3 else "warning",
         "downloader_failed",
@@ -307,6 +332,7 @@ def run_daemon(settings: DownloaderSettings, *, every: int, jitter: int) -> int:
         publish=lambda state, **kw: save(settings, state, **kw),
         read_request=lambda: read_request(settings),
         clear_request=lambda at: clear_request(settings, at),
+        report=lambda status, at, message: record(settings, status, at, message),
     )
     serve(daemon, stop)
     return OK

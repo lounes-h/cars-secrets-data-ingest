@@ -43,6 +43,7 @@ describe("endpoints", () => {
     await api.downloader();
     await api.downloadNow();
     await api.runs({ limit: 5 });
+    await api.runList({ limit: 5 });
     await api.run(3);
     await api.retryRun(3);
     await api.runRows(3, { kind: "new" });
@@ -67,6 +68,7 @@ describe("endpoints", () => {
     await api.removeFavorite("copart", "1");
     expect(calls).toEqual([
       "GET /api/auth/me", "GET /api/downloader", "POST /api/downloader/run", "GET /api/runs?limit=5",
+      "GET /api/runs?limit=5&downloads=true",
       "GET /api/runs/3", "POST /api/runs/3/retry", "GET /api/runs/3/rows?kind=new", "GET /api/alerts",
       "POST /api/alerts/4/ack", "POST /api/alerts/4/resolve", "GET /api/schema", "GET /api/lots?q=vin",
       "GET /api/lots/copart/a%2Fb", "GET /api/lots/copart/1/images", "GET /api/lot-filters",

@@ -89,6 +89,11 @@ The downloader is a small always-on process (`python -m ingest.downloader daemon
 On the dashboard:
 - **Overview** has a *Downloader running · next download at …* line next to the worker's.
   "Not running" or "paused" turns the pipeline health red.
+- **Runs page:** every download that delivered no file is listed between the ingested files,
+  with why: *missed* (the Mac slept through the planned time, or the downloader was not
+  running), *skipped* (too soon, downloads paused, or Chrome busy with another download or a
+  login), *failed* (the error) or *paused*. A planned download that starts over 10 min late
+  counts as missed.
 - **Runs page:** a live countdown and a **Download now** button. The process picks the request
   up within seconds; the button isn't offered while downloads are paused for a login.
 - **Alerts:** `downloader_down` (critical) when the heartbeat stops for 2.5 min; it resolves
@@ -112,7 +117,7 @@ the dashboard, because Docker sleeps with it. Everything resumes on its own when
 | Chrome crashed | `downloader.browser_retry` in the log; the run still succeeds | Nothing; after 3 crashes in one run, a failure alert |
 | New pop-up that isn't closed | Download failures ("download button not found" or a click timeout) | Add its close button to `COPART_DISMISS_SELECTORS` |
 | Download failing | Warning, then critical, "Copart download failed (N× in a row)" | Check `~/Library/Logs/cars-ingest/downloader.log`; if Copart changed the page, update the button text in `ingest/downloader/browser.py` |
-| Mac asleep | One catch-up download a minute after waking | Nothing, or keep the Mac awake |
+| Mac asleep | A *missed* row on the Runs page, then one catch-up download a minute after waking. The Mac's brief maintenance wakes (a few seconds every ~15 min) are too short for it | Nothing, or keep the Mac awake |
 | Downloader not running | Critical alert, red line on Overview | Usually nothing: launchd restarts it. Otherwise `./start.sh` |
 
 ```bash

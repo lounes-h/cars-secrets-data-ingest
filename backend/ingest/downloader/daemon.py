@@ -5,7 +5,7 @@ Every few seconds it:
 - starts a download when the planned time comes (hourly, plus a random 0..jitter delay, never
   before pacing/backoff allows), or right away when the dashboard asked for one;
 - catches up after the Mac slept through a planned download, a minute after waking so the
-  network is back first.
+  network is back first, and reports the planned download as missed (the Runs page shows it).
 
 It plans but never forces past a pause: after a challenge page, or a saved login that failed
 several runs in a row, nothing is scheduled until `login` clears it. All I/O is injected, so
@@ -29,6 +29,12 @@ log = structlog.get_logger()
 HEARTBEAT = timedelta(seconds=30)
 WAKE_GRACE = timedelta(seconds=60)  # after a sleep, let the network come back first
 SLEEP_GAP = timedelta(seconds=60)  # a longer gap between ticks means the Mac was asleep
+MISSED_AFTER = timedelta(minutes=10)  # a planned download this late was missed
+
+
+def _minutes(delta: timedelta) -> str:
+    m = round(delta.total_seconds() / 60)
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
 
 
 def _parse(ts: str | None) -> datetime | None:
@@ -68,12 +74,14 @@ class Daemon:
     publish: Callable[..., None]  # (state, *, heartbeat, started_at=None, stopped=False)
     read_request: Callable[[], datetime | None]
     clear_request: Callable[[datetime], None]
+    report: Callable[[str, datetime, str], None]  # (status, at, message): no file delivered
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     rng: random.Random = field(default_factory=random.Random)
     started_at: datetime | None = None
     _last_tick: datetime | None = None
     _last_heartbeat: datetime | None = None
     _hold_until: datetime | None = None
+    _woke_at: datetime | None = None
 
     def _jitter(self) -> timedelta:
         return timedelta(seconds=self.rng.uniform(0, self.max_jitter_s))
@@ -90,6 +98,11 @@ class Daemon:
         now = self.clock()
         self.started_at = now
         state = self._load()
+        due = _parse(state.next_run_at)
+        if due is not None and now - due > MISSED_AFTER:
+            self.report("missed", due, "Not downloaded at the planned time: the downloader was "
+                        f"not running (Mac off or logged out). It was back {_minutes(now - due)} "
+                        "later.")
         state.activity = "idle"
         state.next_run_at = None  # replanned on the first tick
         if lift_login_pause(state, self.settings):
@@ -109,7 +122,7 @@ class Daemon:
     def tick(self) -> None:
         now = self.clock()
         if self._last_tick and now - self._last_tick > SLEEP_GAP:
-            self._hold_until = now + WAKE_GRACE
+            self._woke_at, self._hold_until = now, now + WAKE_GRACE
             log.info("downloader.resumed_after_sleep", gap=str(now - self._last_tick))
         self._last_tick = now
 
@@ -136,13 +149,20 @@ class Daemon:
 
     def _download(self, state: State, now: datetime, *, force: bool,
                   request: datetime | None = None) -> None:
+        due = _parse(state.next_run_at)
+        if due is not None and now - due > MISSED_AFTER:
+            why = ("the Mac was asleep" if self._woke_at and self._woke_at > due
+                   else "the downloader was stuck, see its log")
+            self.report("missed", due, f"Not downloaded at the planned time: {why}. "
+                        f"The download started {_minutes(now - due)} late.")
         state.activity = "downloading"
         self._publish(state, now)
         log.info("downloader.cycle", requested=request is not None)
         try:
             self.run(force)
-        except Exception:  # noqa: BLE001 - run_once already alerts; never kill the loop
+        except Exception as exc:  # noqa: BLE001 - run_once already alerts; never kill the loop
             log.exception("downloader.cycle_crashed")
+            self.report("failed", now, f"The download crashed: {type(exc).__name__}: {exc}")
         finally:
             if request is not None:
                 self.clear_request(request)
