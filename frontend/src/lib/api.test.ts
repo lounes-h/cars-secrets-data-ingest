@@ -57,6 +57,11 @@ describe("endpoints", () => {
     await api.lotAnalyses("copart", "1");
     await api.analysisModels();
     await api.requestAnalysis("copart", "1", "claude-opus-5-5");
+    const added = { id: "ft:gpt-5.6:acme", provider: "openai", label: "Mine", note: "", input_usd: 1, output_usd: 2 };
+    await api.availableModels("openai");
+    await api.addModel(added);
+    await api.updateModel("ft:gpt-5.6:acme", added);
+    await api.deleteModel("ft:gpt-5.6:acme");
     await api.addFavorite("copart", "1");
     await api.removeFavorite("copart", "1");
     expect(calls).toEqual([
@@ -65,6 +70,8 @@ describe("endpoints", () => {
       "POST /api/alerts/4/ack", "POST /api/alerts/4/resolve", "GET /api/schema", "GET /api/lots?q=vin",
       "GET /api/lots/copart/a%2Fb", "GET /api/lots/copart/1/images", "GET /api/lot-filters",
       "GET /api/lots/copart/1/analyses", "GET /api/analysis-models", "POST /api/lots/copart/1/analyses",
+      "GET /api/analysis-models/available?provider=openai", "POST /api/analysis-models",
+      "PUT /api/analysis-models/ft%3Agpt-5.6%3Aacme", "DELETE /api/analysis-models/ft%3Agpt-5.6%3Aacme",
       "PUT /api/lots/copart/1/favorite", "DELETE /api/lots/copart/1/favorite",
     ]);
   });

@@ -21,6 +21,7 @@ x-backend: &backend
     APIAUCTIONS_TOKEN: ${APIAUCTIONS_TOKEN:-}
     # AI damage analysis of a lot, run by the worker when asked from the lot page.
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}  # for models a person added on the lot page
     AI_PROVIDER: ${AI_PROVIDER:-anthropic}
     AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
     AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-vehicle-damage-v1}
@@ -101,6 +102,9 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       AI_LANGUAGE: ${AI_LANGUAGE:-en}  # language of a requested analysis unless it names one
       AI_MODEL: ${AI_MODEL:-claude-opus-5-5}  # the model preselected for a new analysis
+      # to list each provider's models when a person adds one (only the worker calls them)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - ./data:/data  # "retry" moves a failed file back into the inbox
     depends_on:

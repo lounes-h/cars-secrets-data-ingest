@@ -33,7 +33,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `auction_apis.py`, `api_check.py` | Clients for apibara.tech and apiauctions.io (third-party Copart/IAA data with final prices), and the check of their data against our lots |
 | `apiauctions_import.py`, `apiauctions_codes.json` | Real sale prices from apiauctions into `lots` (`final_price`), and the translations of its wording into our Copart codes |
 | `vehicle_analysis.py` | AI condition and damage analysis of a lot: photo selection and resizing, the versioned prompt, the answer's schema and its validation, the queue the worker runs |
-| `ai.py` | AI model clients behind one call (`ask`): text and photos in, schema-valid JSON out; Anthropic's is the only one |
+| `ai.py` | AI model clients behind one call (`ask`): text and photos in, schema-valid JSON out, priced; Anthropic and OpenAI, and each one's model list for the "add a model" form |
 | `providers/` | Everything provider-specific (see below) |
 | `schema.py` | Canonical typed columns of `lots` |
 | `alerts.py` | Alert rules (pure) and storage (dedupe by fingerprint, auto-resolve) |
@@ -53,6 +53,7 @@ downloader ──► data/inbox/<provider>/*.csv
 | `worker_heartbeat` | Liveness of the worker |
 | `vehicle_analyses` | One row per requested AI analysis of a lot: status, provider, model, language, prompt and schema versions, the metadata and photos sent (`image_01` … → the listing's photo), how they were chosen, the validated result, the raw answer, request id, tokens and cost of each model call (`usage`), the exact request (`request`: settings, and per call the parameters, prompts and message), error, timestamps |
 | `lot_favorites` | Lots each dashboard user marked as favorite (`username` = the session's user) |
+| `ai_models` | AI models a person added on the lot page (id as the provider spells it, provider, name, note, price per million tokens), besides the built-in `ai.MODELS` |
 
 ### Why the schema survives CSV changes
 
@@ -328,14 +329,16 @@ and the model that give the best analyses for their cost. Each analysis therefor
 shaped it: its `request` (below), its tokens and cost (`usage`), and its result or failure.
 
 A person asks for it from the lot page: "Generate AI Analysis" opens a dialog that offers the
-models of `ai.MODELS` (`GET /api/analysis-models`: name, note, price per million tokens, with
-`AI_MODEL` preselected). `POST /api/lots/{source}/{lot_number}/analyses` with the chosen
-`model` inserts a `queued` row in `vehicle_analyses`; the API refuses a model that is not
-listed, so a client never picks an unpriced one. A partial unique index allows one queued or
-running analysis per lot, so a second click gets a 409. The worker's analysis thread claims the
-oldest queued row every `ANALYSIS_POLL_SECONDS` (3 s), stamps it with `AI_PROVIDER`,
-`AI_PROMPT_VERSION` and `AI_SCHEMA_VERSION` (and `AI_MODEL` if the request named no model), and
-runs it with the request's model (`vehicle_analysis.run`), one at a time:
+built-in models of `ai.MODELS`, then those people added (`GET /api/analysis-models`: name,
+note, provider, price per million tokens, `custom` for an added one, with `AI_MODEL`
+preselected). `POST /api/lots/{source}/{lot_number}/analyses` with the chosen `model` inserts a
+`queued` row in `vehicle_analyses`, with the provider of an added model; the API refuses a
+model that is neither built in nor added, so a client never picks an unpriced one. A partial
+unique index allows one queued or running analysis per lot, so a second click gets a 409. The
+worker's analysis thread claims the oldest queued row every `ANALYSIS_POLL_SECONDS` (3 s),
+stamps it with `AI_PROVIDER` (unless an added model set its own), `AI_PROMPT_VERSION` and
+`AI_SCHEMA_VERSION` (and `AI_MODEL` if the request named no model), and runs it with the
+request's model on that provider (`vehicle_analysis.run`), one at a time:
 
 1. **Photos.** The provider's `fetch_images` lists the lot's photos; each is downloaded in its
    largest size (HD, else full, else thumbnail) and re-encoded as a JPEG whose longest side is
@@ -375,19 +378,40 @@ page shows all of it under "Prompt and Request". Analyses made before migration 
 
 `usage` keeps, per model call (`selection`, `analysis`), the answering model, input and output
 tokens (photos count as input, thinking as output) and `cost_usd`. The cost is computed when
-the call is made, from `ai.MODELS` (USD per million tokens, as of 2026-09): keep that table in
-step with Anthropic's prices. A model missing from it has no cost; the page then says "cost
-unknown". A call whose answer came back unusable (refused, cut off, not JSON, invalid) is
-billed, so it is recorded too, and a failed attempt shows what it spent. After a server-side
-fallback only the answering model's tokens are priced.
+the call is made (`ai.ask`), at the answering model's price when it is built in (`ai.MODELS`,
+USD per million tokens, as of 2026-09: keep that table in step with Anthropic's prices), else at
+the added model's price (providers answer with a dated snapshot of the id they were asked
+for). A model with neither has no cost, like an added one deleted while its analysis waited;
+the page then says "cost unknown". A call whose answer came back unusable (refused, cut off,
+not JSON, invalid) is billed, so it is recorded too, and a failed attempt shows what it spent.
+After a server-side fallback only the answering model's tokens are priced.
 
-The Anthropic client runs the chosen model (Opus 5.5, Sonnet 5.5 or Fable 5.1; Opus 5.5 by
-default) at high effort, streams the answer (up to 32k
-tokens, 300 s timeout) and opts into server-side fallback, which re-runs a request a safety
-classifier declines on the model Anthropic recommends. Another provider is a function in
-`ai.CLIENTS` with the same signature; a new prompt or schema is a new entry in
+The Anthropic client runs the chosen model (Opus 5.5, Sonnet 5.5 or Fable 5.1 built in; Opus
+5.5 by default) at high effort, streams the answer (up to 32k tokens, 300 s timeout) and opts
+into server-side fallback, which re-runs a request a safety classifier declines on the model
+Anthropic recommends. The OpenAI client sends the same request through the Responses API:
+photos as base64 JPEG (`detail: high`), `reasoning.effort` high, up to 32k output tokens, and
+the schema in strict mode, as is (every released schema has closed objects and every property
+required; a test keeps it so). Another provider is a function in `ai.CLIENTS` with the same
+signature, plus one in `ai.MODEL_LISTS`; a new prompt or schema is a new entry in
 `vehicle_analysis.PROMPTS` or `SCHEMAS`, selected by its version. English is the only output
 language (`LANGUAGES`); a request may name one, and the row keeps it.
+
+### Added models
+
+The dialog's "Add a model" form adds an Anthropic or OpenAI model (`POST /api/analysis-models`);
+an added one can be edited (`PUT /api/analysis-models/{id}`, its id included) or deleted
+(`DELETE`); built-in ones cannot. An id already used, built in or added, gets a 409. Past
+analyses keep the model id and cost they ran with, whatever happens to the model afterwards.
+The model id is offered from the provider's list (`GET /api/analysis-models/available?provider=`,
+cached 15 min; typing any other id works too), which fills in the name. Neither provider's API
+gives prices, so a person types them. Anthropic's list keeps only models that report taking
+this client's request (photos, structured outputs, high effort); OpenAI's reports no
+capabilities, so its reasoning models are picked by name (`ai.OPENAI_MODEL`: GPT-5 and later,
+o3 and later, minus audio, realtime, image, search, research and chat variants). The model must take
+the client's request (above): one that does not fails its analysis with the provider's error.
+Listing needs the provider's key in the API process too (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`); without it the form says so and the id is typed.
 
 ## Adding a provider
 

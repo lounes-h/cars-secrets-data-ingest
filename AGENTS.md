@@ -8,8 +8,8 @@ an export into `data/inbox/<provider>/` every hour; saving the file triggers ing
 ## Tech stack
 
 - **Backend** (`backend/`): Python 3.12, psycopg 3 (`COPY` for bulk loads), FastAPI + uvicorn,
-  watchdog (file events), pydantic-settings, Alembic, structlog, Anthropic SDK + Pillow (AI
-  damage analysis). Package: `ingest`.
+  watchdog (file events), pydantic-settings, Alembic, structlog, Anthropic and OpenAI SDKs +
+  Pillow (AI damage analysis). Package: `ingest`.
 - **Database**: PostgreSQL 17, twice: the ingest database (source of truth, full history) and
   the API's database (`cars-secrets-api`), which the worker keeps in step.
 - **Frontend** (`frontend/`): React 19 + TypeScript, Vite, TanStack Query, React Router,
@@ -139,18 +139,25 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   the parameters, prompts and message sent; `request`), its tokens and cost (`usage`) and its
   outcome, and the lot page shows them. Only a person triggers it, from the lot page; never analyze lots automatically (each run spends API
   credit). The API queues a `vehicle_analyses` row (one queued/running per lot, partial unique
-  index) with the model chosen in the page's dialog, one of `ai.MODELS` (default `AI_MODEL`;
-  the API refuses others); the worker runs it with that model, stamped with `AI_PROVIDER`/
-  `AI_PROMPT_VERSION`/`AI_SCHEMA_VERSION`, and keeps what it sent and got back, success or not. Regenerating adds
+  index) with the model chosen in the page's dialog: one of `ai.MODELS` (built in, default
+  `AI_MODEL`) or one a person added there (`ai_models`, Anthropic or OpenAI; the API refuses
+  others); the worker runs it with that model, stamped with its provider (an added model's, else
+  `AI_PROVIDER`)/`AI_PROMPT_VERSION`/`AI_SCHEMA_VERSION`, and keeps what it sent and got back,
+  success or not. Regenerating adds
   a row, never overwrites one. At most `AI_MAX_IMAGES` (5) photos go to the model, shrunk to
   `AI_IMAGE_MAX_PX` (1024), renamed `image_01` …; with more photos than that, the model first
   picks them from 384 px copies. An answer is `completed` only if it passes `AnalysisV1`
   (schema and every cross-reference: regions mark observed damage on a photo it cites; hidden
   damage has no box). Changing the prompt or the answer's shape = a new entry in `PROMPTS` or
-  `SCHEMAS` under a new version, never an edit of a released one. Another model provider = a
-  function in `ai.CLIENTS`. No costs, values or bids in the analysis. Each model call's
-  tokens and cost are stored in `usage` and shown on the page; keep `ai.MODELS` in step
-  with the provider's prices, and offer only models that accept the client's request.
+  `SCHEMAS` under a new version, never an edit of a released one; a released schema stays
+  strict-mode ready for OpenAI (closed objects, every property required, no defaults: a test
+  checks). Another model provider = a function in `ai.CLIENTS` and one in `ai.MODEL_LISTS`. No
+  costs, values or bids in the analysis. Each model call's tokens and cost are stored in
+  `usage` and shown on the page; keep `ai.MODELS` in step with the provider's prices, and build
+  in only models that accept the client's request. Added models: a person adds them in the
+  dialog, picking the id from the provider's model list (the API lists it; typing any id works)
+  and typing the price (neither API gives one); only added ones can be edited or deleted, and
+  past analyses keep the id and cost they ran with.
 - **Alerts**: rules are pure functions (`alerts.evaluate_*`, `monitor.check_*`) so they are
   unit-testable; storage dedupes by `fingerprint` (one open alert per condition). Conditions
   that can clear (worker down, no new file, missing column) are auto-resolved. The API
@@ -200,8 +207,9 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
   `sslmode=require` for a hosted database.
 - The downloader's Chrome profile (`~/.cars-ingest/copart-profile`, mode 700) holds the Copart
   session cookie: keep it out of the repo and never copy it elsewhere.
-- `ANTHROPIC_API_KEY` lives in `.env` only and is passed to the worker, the only process that
-  calls the model. The model's answer is untrusted data: validate it before storing it, render
+- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` live in `.env` only. The worker is the only process
+  that calls a model; the API gets the keys only to list each provider's models when a person
+  adds one. The model's answer is untrusted data: validate it before storing it, render
   it as text.
 
 ## Migrations
@@ -334,6 +342,8 @@ A code change is not considered complete until the relevant unit tests have been
   5.5, prompt `vehicle-damage-v1`, schema 1.0, English. Tested against a fake model only: it
   needs `ANTHROPIC_API_KEY` in `.env`, and its accuracy on real lots is not measured yet. It
   sends Copart photos to Anthropic, which the Copart license question above also covers.
+  Anthropic and OpenAI models can be added from the dialog (2026-09-29); OpenAI's client is
+  tested against a fake too (needs `OPENAI_API_KEY`), and sends the photos to OpenAI.
 - Not done yet: external alert channels, a second provider (IAA sales are stored, not its
   live lots).
 

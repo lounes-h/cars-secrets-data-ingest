@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import {
-  api, type AIUsage, type AnalysisImage, type AnalysisRequestRecord, type DamageRegion,
+  api, type AddedModel, type AIUsage, type AnalysisModel, type AnalysisImage, type AnalysisRequestRecord, type DamageRegion,
   type DamageSeverity, type LotAnalyses, type ObservedDamage, type SentContent, type SentRequest,
   type VehicleAnalysis,
 } from "../lib/api";
@@ -57,9 +57,86 @@ function SeverityTag({ severity }: { severity: DamageSeverity }) {
 }
 
 const perMillion = (usd: number) => `$${usd}`;
+const PROVIDERS: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI" };
+
+/** Adds a model, or changes one a person added. Its id is offered from the provider's list,
+ * which fills in its name; its price is typed, since neither provider's API publishes it. */
+function ModelForm({ model, onDone }: { model: AnalysisModel | null; onDone: (saved?: string) => void }) {
+  const qc = useQueryClient();
+  const [fields, setFields] = useState({
+    provider: model?.provider ?? "anthropic", id: model?.id ?? "", label: model?.label ?? "", note: model?.note ?? "",
+    input_usd: String(model?.input_usd ?? ""), output_usd: String(model?.output_usd ?? ""),
+  });
+  const available = useQuery({
+    queryKey: ["available-models", fields.provider],
+    queryFn: () => api.availableModels(fields.provider),
+    staleTime: 15 * 60_000,
+    retry: false,
+  });
+  const save = useMutation({
+    mutationFn: (body: AddedModel) => (model ? api.updateModel(model.id, body) : api.addModel(body)),
+    onSuccess: (saved) => {
+      void qc.invalidateQueries({ queryKey: ["analysis-models"] });
+      onDone(saved.id);
+    },
+  });
+  const set = (name: keyof typeof fields) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const value = e.target.value;
+    setFields((f) => {
+      const listed = name === "id" && !f.label ? available.data?.models.find((m) => m.id === value) : undefined;
+      return { ...f, [name]: value, ...(listed && { label: listed.label }) };
+    });
+  };
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    save.mutate({ ...fields, input_usd: Number(fields.input_usd), output_usd: Number(fields.output_usd) });
+  };
+  const title = model ? `Edit ${model.label}` : "Add a model";
+  const provider = PROVIDERS[fields.provider];
+  const count = available.data?.models.length;
+  return (
+    <form className="model-form" aria-label={title} onSubmit={submit}>
+      <h3>{title}</h3>
+      <label>
+        Provider
+        <select value={fields.provider} onChange={set("provider")}>
+          {Object.entries(PROVIDERS).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </select>
+      </label>
+      <label>
+        Model id
+        <input type="text" list="provider-models" required maxLength={100} pattern="[A-Za-z0-9][A-Za-z0-9._:\-]*"
+          autoComplete="off" value={fields.id} onChange={set("id")} />
+      </label>
+      <datalist id="provider-models">
+        {available.data?.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+      </datalist>
+      <span className="muted small">
+        {available.isLoading ? `Listing ${provider}'s models…`
+          : available.error ? `${available.error.message}. Type the id.`
+          : `${count} model${count === 1 ? "" : "s"} offered by ${provider}; any other id can be typed.`}
+      </span>
+      <label>Name<input type="text" required maxLength={100} value={fields.label} onChange={set("label")} /></label>
+      <label>Note<input type="text" maxLength={300} value={fields.note} onChange={set("note")} /></label>
+      <label>
+        Input, $ per million tokens
+        <input type="number" required min={0} step="any" value={fields.input_usd} onChange={set("input_usd")} />
+      </label>
+      <label>
+        Output, $ per million tokens
+        <input type="number" required min={0} step="any" value={fields.output_usd} onChange={set("output_usd")} />
+      </label>
+      {save.error && <span className="error" role="alert">{save.error.message}</span>}
+      <div className="dialog-actions">
+        <button type="button" onClick={() => onDone()}>Cancel</button>
+        <button type="submit" className="primary" disabled={save.isPending}>Save</button>
+      </div>
+    </form>
+  );
+}
 
 /** The lot page's action: generate, or regenerate once an analysis exists, with the model
- * chosen in a dialog. */
+ * chosen in a dialog, where models can also be added, and added ones changed or deleted. */
 export function AnalysisButton({ source, lotNumber }: { source: string; lotNumber: string }) {
   const qc = useQueryClient();
   const key = ["lot-analysis", source, lotNumber];
@@ -67,12 +144,18 @@ export function AnalysisButton({ source, lotNumber }: { source: string; lotNumbe
   const analyses = useLotAnalyses(source, lotNumber);
   const models = useQuery({ queryKey: ["analysis-models"], queryFn: api.analysisModels, staleTime: Infinity });
   const [picked, setPicked] = useState<string | null>(null);
-  const model = picked ?? models.data?.default;
+  const [editing, setEditing] = useState<AnalysisModel | "new" | null>(null);
+  // a deleted or renamed model is no longer picked
+  const model = models.data?.models.some((m) => m.id === picked) ? picked : models.data?.default;
   const generate = useMutation({
     mutationFn: (chosen: string) => api.requestAnalysis(source, lotNumber, chosen),
     // The queued request is current at once: the button never re-enables before the refetch.
     onSuccess: (queued) => qc.setQueryData<LotAnalyses>(key, (old) => ({ latest: old?.latest ?? null, current: queued })),
     onSettled: () => qc.invalidateQueries({ queryKey: key }),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteModel(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["analysis-models"] }),
   });
   const busy = generate.isPending || pending(analyses.data);
   const title = analyses.data?.latest ? "Regenerate AI Analysis" : "Generate AI Analysis";
@@ -81,36 +164,58 @@ export function AnalysisButton({ source, lotNumber }: { source: string; lotNumbe
     dialog.current?.close();
     generate.mutate(model!);
   };
+  const open = () => {
+    setEditing(null);
+    dialog.current?.showModal();
+  };
+  const done = (saved?: string) => {
+    if (saved) setPicked(saved);
+    setEditing(null);
+  };
   return (
     <>
-      <button className="primary" disabled={busy || !analyses.data} onClick={() => dialog.current?.showModal()}>
+      <button className="primary" disabled={busy || !analyses.data} onClick={open}>
         {busy ? "Generating AI Analysis…" : title}
       </button>
       {generate.error && <span className="error" role="alert">{generate.error.message}</span>}
       <dialog ref={dialog} className="model-dialog" aria-labelledby="model-dialog-title">
-        <form onSubmit={submit}>
-          <h2 id="model-dialog-title">{title}</h2>
-          <p className="muted small">Choose the model. Each analysis is billed by the tokens it uses (photos count as input).</p>
-          <QueryState isLoading={models.isLoading} error={models.error} />
-          <fieldset>
-            <legend className="visually-hidden">Model</legend>
-            {models.data?.models.map((m) => (
-              <label key={m.id} className="model-option">
-                <input type="radio" name="model" value={m.id} checked={model === m.id} onChange={() => setPicked(m.id)} />
-                <span>
-                  <strong>{m.label}</strong>{m.id === models.data.default && <span className="muted small"> · default</span>}
-                  <span className="muted small model-note">
-                    {m.note} · {perMillion(m.input_usd)} in / {perMillion(m.output_usd)} out per million tokens
-                  </span>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="dialog-actions">
-            <button type="button" onClick={() => dialog.current?.close()}>Cancel</button>
-            <button type="submit" className="primary" disabled={!model}>Generate</button>
-          </div>
-        </form>
+        <h2 id="model-dialog-title">{title}</h2>
+        {editing ? <ModelForm model={editing === "new" ? null : editing} onDone={done} /> : (
+          <form onSubmit={submit}>
+            <p className="muted small">Choose the model. Each analysis is billed by the tokens it uses (photos count as input).</p>
+            <QueryState isLoading={models.isLoading} error={models.error} />
+            <fieldset>
+              <legend className="visually-hidden">Model</legend>
+              {models.data?.models.map((m) => (
+                <div key={m.id} className="model-option">
+                  <label>
+                    <input type="radio" name="model" value={m.id} checked={model === m.id} onChange={() => setPicked(m.id)} />
+                    <span>
+                      <strong>{m.label}</strong>{m.id === models.data.default && <span className="muted small"> · default</span>}
+                      <span className="muted small model-note">
+                        {m.custom && `${PROVIDERS[m.provider] ?? m.provider} · `}{m.note && `${m.note} · `}
+                        {perMillion(m.input_usd)} in / {perMillion(m.output_usd)} out per million tokens
+                      </span>
+                    </span>
+                  </label>
+                  {m.custom && (
+                    <span className="model-actions">
+                      <button type="button" className="small" aria-label={`Edit ${m.label}`} onClick={() => setEditing(m)}>Edit</button>
+                      <button type="button" className="small" aria-label={`Delete ${m.label}`} disabled={remove.isPending}
+                        onClick={() => remove.mutate(m.id)}>Delete</button>
+                    </span>
+                  )}
+                </div>
+              ))}
+            </fieldset>
+            {remove.error && <p className="error" role="alert">{remove.error.message}</p>}
+            <div className="dialog-actions">
+              <button type="button" className="small add-model" onClick={() => setEditing("new")}>Add a model</button>
+              <button type="button" onClick={() => dialog.current?.close()}>Cancel</button>
+              <button type="submit" className="primary" disabled={!model}>Generate</button>
+            </div>
+          </form>
+        )}
       </dialog>
     </>
   );
@@ -196,10 +301,10 @@ function SentMessage({ content }: { content: SentContent[] }) {
   for (let i = 0; i < content.length; i++) {
     const block = content[i];
     const next = content[i + 1];
-    if (block.type === "text" && next?.type === "image") {
+    if ("text" in block && next && "bytes" in next) {
       blocks.push(<div key={i} className="mono small">{block.text}: JPEG photo, {bytes(next.bytes)}</div>);
       i++;
-    } else if (block.type === "text") {
+    } else if ("text" in block) {
       blocks.push(<pre key={i} className="prompt">{block.text}</pre>);
     } else {
       blocks.push(<div key={i} className="mono small">JPEG photo, {bytes(block.bytes)}</div>);
@@ -209,17 +314,20 @@ function SentMessage({ content }: { content: SentContent[] }) {
 }
 
 function SentCall({ title, sent }: { title: string; sent: SentRequest }) {
-  const { system, messages, output_config: { format, ...output }, ...params } = sent;
-  const photos = messages[0].content.filter((b) => b.type === "image").length;
+  // Anthropic's shape, or OpenAI's (see SentRequest)
+  const { system, instructions, messages, input, output_config, text, ...params } = sent;
+  const { format, ...output } = (output_config ?? text)!;
+  const content = (messages ?? input)![0].content;
+  const photos = content.filter((b) => "bytes" in b).length;
   return (
     <details className="sent-call">
       <summary>{title} · {sent.model} · {photos} photos</summary>
       <h5>Parameters</h5>
-      <pre>{JSON.stringify({ ...params, output_config: { ...output, format: format.type } }, null, 2)}</pre>
+      <pre>{JSON.stringify({ ...params, [output_config ? "output_config" : "text"]: { ...output, format: format.type } }, null, 2)}</pre>
       <h5>System prompt</h5>
-      <pre className="prompt">{system}</pre>
+      <pre className="prompt">{system ?? instructions}</pre>
       <h5>User message</h5>
-      <SentMessage content={messages[0].content} />
+      <SentMessage content={content} />
       <details>
         <summary className="small">Output schema ({format.type})</summary>
         <pre>{JSON.stringify(format.schema, null, 2)}</pre>

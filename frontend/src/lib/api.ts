@@ -256,17 +256,26 @@ export interface AIUsage {
   cost_usd?: number | null;
 }
 
-/** One block of a message as sent to the model; photos are recorded by their size. */
+/** One block of a message as sent to the model (Anthropic's type, or OpenAI's `input_*`);
+ * photos are recorded by their size. */
 export type SentContent =
-  | { type: "text"; text: string }
-  | { type: "image"; media_type: string; bytes: number };
+  | { type: "text" | "input_text"; text: string }
+  | { type: "image" | "input_image"; media_type: string; bytes: number; detail?: string };
 
-/** A model call's request as sent: parameters, system prompt, message, output schema. */
+type SentOutput = { format: { type: string; schema: unknown; [key: string]: unknown }; [key: string]: unknown };
+type SentMessages = { role: string; content: SentContent[] }[];
+
+/** A model call's request as its client sent it: parameters, system prompt, message, output
+ * schema. Anthropic's: `system`, `messages`, `output_config`; OpenAI's: `instructions`,
+ * `input`, `text`. */
 export interface SentRequest {
   model: string;
-  system: string;
-  output_config: { format: { type: string; schema: unknown }; [key: string]: unknown };
-  messages: { role: string; content: SentContent[] }[];
+  system?: string;
+  instructions?: string;
+  output_config?: SentOutput;
+  text?: SentOutput;
+  messages?: SentMessages;
+  input?: SentMessages;
   [key: string]: unknown;
 }
 
@@ -309,7 +318,13 @@ export interface AnalysisModel {
   note: string;
   input_usd: number;
   output_usd: number;
+  /** "anthropic" or "openai" */
+  provider: string;
+  /** Added by a person, who may change or delete it; the others are built in. */
+  custom: boolean;
 }
+
+export type AddedModel = Omit<AnalysisModel, "custom">;
 
 export interface LotAnalyses {
   /** The latest completed analysis, shown on the lot page. */
@@ -408,6 +423,12 @@ export const api = {
     request<LotAnalyses>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`),
   analysisModels: () => request<{ default: string; models: AnalysisModel[] }>("GET", "/api/analysis-models"),
+  availableModels: (provider: string) =>
+    request<{ models: { id: string; label: string }[] }>("GET", withParams("/api/analysis-models/available", { provider })),
+  addModel: (model: AddedModel) => request<AnalysisModel>("POST", "/api/analysis-models", model),
+  updateModel: (id: string, model: AddedModel) =>
+    request<AnalysisModel>("PUT", `/api/analysis-models/${encodeURIComponent(id)}`, model),
+  deleteModel: (id: string) => request<void>("DELETE", `/api/analysis-models/${encodeURIComponent(id)}`),
   requestAnalysis: (source: string, lotNumber: string, model: string) =>
     request<VehicleAnalysis>(
       "POST", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`, { model }),

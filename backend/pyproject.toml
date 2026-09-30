@@ -18,6 +18,7 @@ dependencies = [
     "pandas>=3.0",
     "anthropic>=1.0",
     "pillow>=11",
+    "openai>=3.0",
 ]
 
 [project.optional-dependencies]
