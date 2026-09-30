@@ -872,11 +872,12 @@ def test_openai_models_are_listed_by_name_newest_first(settings, monkeypatch):
     settings.openai_api_key = "sk-oai"
     names = ["gpt-4o", "gpt-5.6", "gpt-5.6-mini", "o3", "o4-mini", "gpt-5-chat-latest",
              "gpt-realtime", "gpt-4o-transcribe", "o3-deep-research", "gpt-image-1",
-             "gpt-5-search-api", "text-embedding-3-large", "gpt-audio", "tts-1"]
+             "gpt-5-search-api", "text-embedding-3-large", "gpt-audio", "tts-1", "gpt-6.1-sol",
+             "gpt-6.1-chat-latest", "gpt-10", "o1-mini"]
     models = [SimpleNamespace(id=name, created=n) for n, name in enumerate(names)]
     fake_openai(monkeypatch, models=models)
     assert [m["id"] for m in ai.MODEL_LISTS["openai"](settings)] == [
-        "o4-mini", "o3", "gpt-5.6-mini", "gpt-5.6"]
+        "gpt-10", "gpt-6.1-sol", "o4-mini", "o3", "gpt-5.6-mini", "gpt-5.6"]
 
 
 def test_model_lists_need_the_key_and_report_failures(settings, monkeypatch):

@@ -239,10 +239,10 @@ def list_anthropic(settings: Settings) -> list[dict[str, str]]:
 
 
 # ponytail: OpenAI's list says nothing about what a model accepts, so its names are the guess:
-# reasoning models (they take `reasoning.effort`) that are not audio, image, search or chat
-# variants. Any other id can still be typed in.
-OPENAI_MODEL = re.compile(r"^(gpt-5|o3|o4)(?!.*(audio|realtime|transcribe|tts|image|search|"
-                          r"research|chat))")
+# reasoning models (GPT-5 and later, o3 and later: they take `reasoning.effort`) that are not
+# audio, image, search or chat variants. Any other id can still be typed in.
+OPENAI_MODEL = re.compile(r"^(gpt-([5-9]|[1-9]\d)|o[3-9])(?!.*(audio|realtime|transcribe|tts|"
+                          r"image|search|research|chat))")
 
 
 def list_openai(settings: Settings) -> list[dict[str, str]]:

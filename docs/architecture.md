@@ -407,8 +407,8 @@ The model id is offered from the provider's list (`GET /api/analysis-models/avai
 cached 15 min; typing any other id works too), which fills in the name. Neither provider's API
 gives prices, so a person types them. Anthropic's list keeps only models that report taking
 this client's request (photos, structured outputs, high effort); OpenAI's reports no
-capabilities, so its reasoning models are picked by name (`ai.OPENAI_MODEL`: `gpt-5*`, `o3*`,
-`o4*`, minus audio, realtime, image, search, research and chat variants). The model must take
+capabilities, so its reasoning models are picked by name (`ai.OPENAI_MODEL`: GPT-5 and later,
+o3 and later, minus audio, realtime, image, search, research and chat variants). The model must take
 the client's request (above): one that does not fails its analysis with the provider's error.
 Listing needs the provider's key in the API process too (`ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`); without it the form says so and the id is typed.
