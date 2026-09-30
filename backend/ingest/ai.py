@@ -1,25 +1,29 @@
 """AI model clients: one request of text and JPEG photos in, JSON matching a schema out.
 
 vehicle_analysis.py only calls `ask`, so another provider is one function that turns the same
-arguments into a `Reply`, registered in `CLIENTS` and chosen with `AI_PROVIDER`.
+arguments into a `Reply`, registered in `CLIENTS`, plus one listing its models for the lot
+page's "add a model" form, in `MODEL_LISTS`. Built-in models run on `AI_PROVIDER`; a model a
+person added (`ai_models`) on its own provider.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
+import openai
 
 from .config import Settings
 
 TIMEOUT = 300.0  # seconds per attempt; photos plus a long structured answer take a while
 MAX_TOKENS = 32000  # thinking and the answer; streamed, so no HTTP timeout at this size
 EFFORT = "high"  # thinking is adaptive (not set: the default of the offered models)
-
+LIST_TIMEOUT = 15.0  # listing a provider's models, while a person waits in the dialog
 
 
 @dataclass(frozen=True)
@@ -28,11 +32,12 @@ class Model:
     note: str
     input_usd: float  # per million tokens (photos count as input)
     output_usd: float  # per million tokens (thinking is billed as output)
+    provider: str = "anthropic"  # a key of CLIENTS
 
 
-# The models a person may choose for an analysis: each takes this client's request (effort,
-# structured outputs, server-side fallback). Prices as of 2026-09: keep them in step with
-# Anthropic's. A model answering that is missing here (a fallback) has no cost.
+# The built-in models a person may choose for an analysis, besides the ones people add
+# (`ai_models`): each takes this client's request (effort, structured outputs, server-side
+# fallback). Prices as of 2026-09: keep them in step with Anthropic's.
 MODELS = {
     "claude-opus-5-5": Model("Claude Opus 5.5", "Anthropic's current Opus model", 4.0, 20.0),
     "claude-sonnet-5-5": Model("Claude Sonnet 5.5", "Faster, half the price of Opus 5.5", 2.0,
@@ -43,8 +48,12 @@ MODELS = {
 }
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
-    price = MODELS.get(model)
+def cost_usd(model: str, input_tokens: int, output_tokens: int,
+             asked: Model | None = None) -> float | None:
+    """Priced at the answering model's rate when it is built in (a server-side fallback
+    answers with one), else at `asked`'s, the added model the request named: providers answer
+    with a dated snapshot of the id they were asked for."""
+    price = MODELS.get(model) or asked
     if price is None:
         return None
     return round((input_tokens * price.input_usd + output_tokens * price.output_usd)
@@ -110,10 +119,7 @@ def ask_anthropic(settings: Settings, system: str, parts: list[Part],
         raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}",
                       request=sent) from exc
     tokens_in, tokens_out = message.usage.input_tokens, message.usage.output_tokens
-    # ponytail: priced at the answering model's rate; after a server-side fallback the declined
-    # attempt (usage.iterations) is not counted. Sum the iterations if fallbacks become common.
-    usage = {"model": message.model, "input_tokens": tokens_in, "output_tokens": tokens_out,
-             "cost_usd": cost_usd(message.model, tokens_in, tokens_out)}
+    usage = {"model": message.model, "input_tokens": tokens_in, "output_tokens": tokens_out}
     raw = "".join(b.text for b in message.content if b.type == "text")
     if message.stop_reason == "refusal":
         category = message.stop_details.category if message.stop_details else None
@@ -129,12 +135,126 @@ def ask_anthropic(settings: Settings, system: str, parts: list[Part],
     return Reply(data, raw, request_id, usage, sent)
 
 
-CLIENTS: dict[str, Client] = {"anthropic": ask_anthropic}
+def ask_openai(settings: Settings, system: str, parts: list[Part],
+               schema: dict[str, Any]) -> Reply:
+    # The schemas are sent as is: they already are what strict mode needs (closed objects,
+    # every property required; a test keeps them so).
+    params = {
+        "model": settings.ai_model, "max_output_tokens": MAX_TOKENS, "instructions": system,
+        "reasoning": {"effort": EFFORT},
+        "text": {"format": {"type": "json_schema", "name": schema.get("title", "answer"),
+                            "schema": schema, "strict": True}},
+    }
+    content = [
+        {"type": "input_text", "text": p} if isinstance(p, str) else
+        {"type": "input_image", "detail": "high",
+         "image_url": "data:image/jpeg;base64," + base64.standard_b64encode(p).decode()}
+        for p in parts
+    ]
+    sent = {**params, "timeout_seconds": TIMEOUT, "input": [{"role": "user", "content": [
+        {"type": "input_text", "text": p} if isinstance(p, str) else
+        {"type": "input_image", "media_type": "image/jpeg", "bytes": len(p), "detail": "high"}
+        for p in parts]}]}
+    try:
+        client = openai.OpenAI(api_key=settings.openai_api_key or None, timeout=TIMEOUT)
+        response = client.responses.create(**params,
+                                           input=[{"role": "user", "content": content}])
+    except openai.APIStatusError as exc:
+        raise AIError(f"the AI provider rejected the request ({exc.status_code}): {exc.message}",
+                      request_id=exc.request_id, request=sent) from exc
+    except openai.OpenAIError as exc:  # timeout, connection, missing API key
+        raise AIError(f"the AI request failed: {type(exc).__name__}: {exc}",
+                      request=sent) from exc
+    request_id = response._request_id
+    usage = {"model": response.model, "input_tokens": response.usage.input_tokens,
+             "output_tokens": response.usage.output_tokens}
+    raw = response.output_text
+    refusal = next((c.refusal for item in response.output if item.type == "message"
+                    for c in item.content if c.type == "refusal"), None)
+    if refusal is not None:
+        raise AIError(f"the model declined the request ({refusal})", raw, request_id, usage,
+                      sent)
+    if response.status == "incomplete":
+        reason = response.incomplete_details.reason if response.incomplete_details else None
+        raise AIError("the answer was cut off at the token limit"
+                      if reason == "max_output_tokens" else
+                      f"the answer is incomplete ({reason})", raw, request_id, usage, sent)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AIError(f"the answer is not valid JSON: {exc}", raw, request_id, usage,
+                      sent) from exc
+    return Reply(data, raw, request_id, usage, sent)
 
 
-def ask(settings: Settings, system: str, parts: list[Part], schema: dict[str, Any]) -> Reply:
+CLIENTS: dict[str, Client] = {"anthropic": ask_anthropic, "openai": ask_openai}
+
+
+def ask(settings: Settings, system: str, parts: list[Part], schema: dict[str, Any],
+        asked: Model | None = None) -> Reply:
+    """The answer of `settings.ai_model` on `settings.ai_provider`; `asked` is the added
+    model it is, if any (for its price)."""
     client = CLIENTS.get(settings.ai_provider)
     if client is None:
         raise AIError(f"unknown AI provider {settings.ai_provider!r} "
                       f"(known: {', '.join(sorted(CLIENTS))})")
-    return client(settings, system, parts, schema)
+    try:
+        reply = client(settings, system, parts, schema)
+    except AIError as exc:
+        _price(exc.usage, asked)
+        raise
+    _price(reply.usage, asked)
+    return reply
+
+
+def _price(usage: dict[str, Any] | None, asked: Model | None) -> None:
+    # ponytail: priced at the answering model's rate; after a server-side fallback the declined
+    # attempt (usage.iterations) is not counted. Sum the iterations if fallbacks become common.
+    if usage:
+        usage["cost_usd"] = cost_usd(usage["model"], usage["input_tokens"],
+                                     usage["output_tokens"], asked)
+
+
+# --- the providers' models, offered when a person adds one ------------------------------------
+
+def _key(value: str, variable: str) -> str:
+    if not value:
+        raise AIError(f"set {variable} in .env to list the provider's models")
+    return value
+
+
+def list_anthropic(settings: Settings) -> list[dict[str, str]]:
+    """Anthropic's models that take this client's request: photos, structured outputs and
+    high effort (a model whose capabilities are not reported is offered)."""
+    key = _key(settings.anthropic_api_key, "ANTHROPIC_API_KEY")
+    try:
+        client = anthropic.Anthropic(api_key=key, timeout=LIST_TIMEOUT)
+        models = list(client.models.list(limit=1000))  # newest first
+    except anthropic.AnthropicError as exc:
+        raise AIError(f"{type(exc).__name__}: {exc}") from exc
+    return [{"id": m.id, "label": m.display_name} for m in models
+            if m.capabilities is None or (m.capabilities.image_input.supported
+                                          and m.capabilities.structured_outputs.supported
+                                          and m.capabilities.effort.high.supported)]
+
+
+# ponytail: OpenAI's list says nothing about what a model accepts, so its names are the guess:
+# reasoning models (they take `reasoning.effort`) that are not audio, image, search or chat
+# variants. Any other id can still be typed in.
+OPENAI_MODEL = re.compile(r"^(gpt-5|o3|o4)(?!.*(audio|realtime|transcribe|tts|image|search|"
+                          r"research|chat))")
+
+
+def list_openai(settings: Settings) -> list[dict[str, str]]:
+    key = _key(settings.openai_api_key, "OPENAI_API_KEY")
+    try:
+        models = list(openai.OpenAI(api_key=key, timeout=LIST_TIMEOUT).models.list())
+    except openai.OpenAIError as exc:
+        raise AIError(f"{type(exc).__name__}: {exc}") from exc
+    return [{"id": m.id, "label": m.id}
+            for m in sorted(models, key=lambda m: m.created, reverse=True)
+            if OPENAI_MODEL.match(m.id)]
+
+
+MODEL_LISTS: dict[str, Callable[[Settings], list[dict[str, str]]]] = {
+    "anthropic": list_anthropic, "openai": list_openai}

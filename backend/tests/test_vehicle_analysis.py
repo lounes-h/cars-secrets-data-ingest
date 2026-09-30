@@ -6,7 +6,9 @@ import re
 from types import SimpleNamespace
 
 import anthropic
+import httpx
 import httpx2
+import openai
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -228,7 +230,7 @@ class FakeAI:
         self.analysis, self.selection, self.calls = analysis or answer(), selection, []
         monkeypatch.setattr(ai, "ask", self)
 
-    def __call__(self, settings, system, parts, schema):
+    def __call__(self, settings, system, parts, schema, price=None):
         self.calls.append(SimpleNamespace(system=system, parts=parts, schema=schema))
         data = self.selection if schema["title"] == "Selection" else self.analysis
         if isinstance(data, Exception):
@@ -457,7 +459,8 @@ def test_the_model_chosen_for_a_request_runs_it(authed, conn, settings, lot, mon
         "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]
     assert offered["models"][1] == {
         "id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5",
-        "note": "Faster, half the price of Opus 5.5", "input_usd": 2.0, "output_usd": 10.0}
+        "note": "Faster, half the price of Opus 5.5", "input_usd": 2.0, "output_usd": 10.0,
+        "provider": "anthropic", "custom": False}
 
     refused = authed.post(url, json={"model": "claude-opus-4-8"})
     assert (refused.status_code, refused.json()["detail"]) == (
@@ -481,6 +484,111 @@ def test_analysis_requests_are_checked(authed, lot):
     authed.cookies.clear()
     assert authed.get(f"/api/lots/copart/{lot.number}/analyses").status_code == 401
     assert authed.post(f"/api/lots/copart/{lot.number}/analyses").status_code == 401
+
+
+GPT = {"id": "gpt-5.6", "provider": "openai", "label": "GPT-5.6", "note": "",
+       "input_usd": 2.0, "output_usd": 8.0}
+
+
+def test_models_can_be_added_changed_and_deleted(authed):
+    added = authed.post("/api/analysis-models", json={**GPT, "label": " GPT-5.6 "})
+    assert added.status_code == 201 and added.json() == {**GPT, "custom": True}
+    models = authed.get("/api/analysis-models").json()["models"]
+    assert [m["custom"] for m in models] == [False, False, False, True]
+    assert models[-1] == {**GPT, "custom": True}
+
+    changed = authed.put("/api/analysis-models/gpt-5.6",
+                         json={**GPT, "id": "gpt-5.6-mini", "input_usd": 0.25})
+    assert changed.status_code == 200 and changed.json()["id"] == "gpt-5.6-mini"
+    assert [m["id"] for m in authed.get("/api/analysis-models").json()["models"]][-1] == (
+        "gpt-5.6-mini")
+    assert authed.get("/api/analysis-models").json()["models"][-1]["input_usd"] == 0.25
+
+    assert authed.delete("/api/analysis-models/gpt-5.6-mini").status_code == 204
+    assert len(authed.get("/api/analysis-models").json()["models"]) == 3
+    assert authed.delete("/api/analysis-models/gpt-5.6-mini").status_code == 404
+
+
+def test_model_changes_are_checked(authed):
+    def detail(response):
+        return response.status_code, response.json()["detail"]
+
+    assert authed.post("/api/analysis-models", json=GPT).status_code == 201
+    assert detail(authed.post("/api/analysis-models", json=GPT)) == (
+        409, "the model 'gpt-5.6' already exists")
+    assert detail(authed.post("/api/analysis-models", json={**GPT, "id": "claude-opus-5-5"})) == (
+        409, "the model 'claude-opus-5-5' already exists")
+    assert detail(authed.post("/api/analysis-models", json={**GPT, "provider": "acme"})) == (
+        422, "unknown provider 'acme'")
+    for bad in ({"id": "gpt 5"}, {"id": ""}, {"label": " "}, {"input_usd": -1},
+                {"output_usd": None}, {"note": "x" * 301}):
+        assert authed.post("/api/analysis-models", json={**GPT, **bad}).status_code == 422, bad
+    # built-in models are code: they cannot be changed or deleted
+    assert authed.put("/api/analysis-models/claude-opus-5-5", json=GPT).status_code == 404
+    assert authed.delete("/api/analysis-models/claude-opus-5-5").status_code == 404
+    assert authed.put("/api/analysis-models/nope", json={**GPT, "id": "nope"}).status_code == 404
+    authed.post("/api/analysis-models", json={**GPT, "id": "o4"})
+    assert detail(authed.put("/api/analysis-models/o4", json=GPT)) == (
+        409, "the model 'gpt-5.6' already exists")
+    assert detail(authed.put("/api/analysis-models/o4",
+                             json={**GPT, "id": "claude-fable-5-1"})) == (
+        409, "the model 'claude-fable-5-1' already exists")
+    authed.post("/api/auth/logout")
+    authed.cookies.clear()
+    assert authed.post("/api/analysis-models", json=GPT).status_code == 401
+    assert authed.delete("/api/analysis-models/o4").status_code == 401
+    assert authed.get("/api/analysis-models/available?provider=openai").status_code == 401
+
+
+def test_an_added_model_runs_on_its_provider_at_its_price(authed, conn, settings, lot,
+                                                          monkeypatch):
+    url = f"/api/lots/copart/{lot.number}/analyses"
+    lot.photos.update({f"https://cs.copart.com/{n}_ful.jpg": jpeg() for n in "ab"})
+    authed.post("/api/analysis-models", json=GPT)
+    queued = authed.post(url, json={"model": "gpt-5.6"}).json()
+    assert (queued["model"], queued["provider"]) == ("gpt-5.6", "openai")
+
+    def fake_openai(settings, system, parts, schema):
+        # OpenAI answers with the snapshot's id, not the alias it was asked for
+        return ai.Reply(answer(), "{}", "req_oai", {"model": "gpt-5.6-2026-03-01",
+                        "input_tokens": 1_000_000, "output_tokens": 100_000})
+
+    monkeypatch.setitem(ai.CLIENTS, "openai", fake_openai)
+    va.process_next(conn, settings)
+    latest = authed.get(url).json()["latest"]
+    assert (latest["provider"], latest["model"]) == ("openai", "gpt-5.6")
+    assert latest["request"]["settings"]["provider"] == "openai"
+    assert latest["usage"]["analysis"]["cost_usd"] == 2.8  # 1M x $2 + 100k x $8
+
+    # a model deleted while its analysis waits still runs; its cost is then unknown
+    authed.delete("/api/analysis-models/gpt-5.6")
+    conn.execute("UPDATE vehicle_analyses SET status = 'queued'")
+    va.process_next(conn, settings)
+    assert authed.get(url).json()["latest"]["usage"]["analysis"]["cost_usd"] is None
+
+
+def test_the_providers_models_are_offered_to_add(authed, monkeypatch):
+    calls = []
+
+    def listing(settings):
+        calls.append(settings)
+        return [{"id": "gpt-5.6", "label": "gpt-5.6"}]
+
+    monkeypatch.setitem(ai.MODEL_LISTS, "openai", listing)
+    url = "/api/analysis-models/available"
+    assert authed.get(url, params={"provider": "openai"}).json() == {
+        "models": [{"id": "gpt-5.6", "label": "gpt-5.6"}]}
+    authed.get(url, params={"provider": "openai"})
+    assert len(calls) == 1  # cached
+
+    def failing(settings):
+        raise ai.AIError("ANTHROPIC_API_KEY is not set")
+
+    monkeypatch.setitem(ai.MODEL_LISTS, "anthropic", failing)
+    refused = authed.get(url, params={"provider": "anthropic"})
+    assert (refused.status_code, refused.json()["detail"]) == (
+        502, "could not list the models: ANTHROPIC_API_KEY is not set")
+    assert authed.get(url, params={"provider": "acme"}).status_code == 422
 
 
 # --- the Anthropic client ------------------------------------------------------------------------
@@ -591,9 +699,203 @@ def test_anthropic_errors_become_ai_errors(settings, monkeypatch):
 def test_cost_follows_the_model_price_and_is_unknown_for_other_models():
     assert ai.cost_usd("claude-sonnet-5-5", 1_000_000, 100_000) == 3.0
     assert ai.cost_usd("claude-opus-4-8", 1000, 1000) is None
+    added = ai.Model("GPT-5.6", "", 2.0, 8.0, "openai")
+    assert ai.cost_usd("gpt-5.6-2026-03-01", 1_000_000, 100_000, added) == 2.8
+    # a server-side fallback answering with a built-in model is billed at that model's price
+    assert ai.cost_usd("claude-sonnet-5-5", 1_000_000, 100_000, added) == 3.0
 
 
 def test_an_unknown_provider_is_an_error(settings):
     settings.ai_provider = "acme"
-    with pytest.raises(ai.AIError, match="unknown AI provider 'acme' \\(known: anthropic\\)"):
+    with pytest.raises(ai.AIError,
+                       match="unknown AI provider 'acme' \\(known: anthropic, openai\\)"):
         ai.ask(settings, "s", ["t"], {"type": "object"})
+
+
+# --- the OpenAI client ---------------------------------------------------------------------------
+
+def fake_openai(monkeypatch, response=None, models=()):
+    sent, clients = {}, []
+
+    def create(**kwargs):
+        sent.update(kwargs)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def listing():
+        if isinstance(models, Exception):
+            raise models
+        return iter(models)
+
+    def client(**kwargs):
+        clients.append(kwargs)
+        return SimpleNamespace(responses=SimpleNamespace(create=create),
+                               models=SimpleNamespace(list=listing))
+
+    monkeypatch.setattr(ai.openai, "OpenAI", client)
+    return sent, clients
+
+
+def response(text, status="completed", reason=None, refusal=None):
+    content = ([SimpleNamespace(type="refusal", refusal=refusal)] if refusal else
+               [SimpleNamespace(type="output_text", text=text)])
+    return SimpleNamespace(
+        status=status, model="gpt-5.6-2026-03-01", _request_id="req_oai",
+        incomplete_details=SimpleNamespace(reason=reason) if reason else None,
+        output=[SimpleNamespace(type="reasoning"), SimpleNamespace(type="message",
+                                                                   content=content)],
+        output_text="" if refusal else text,
+        usage=SimpleNamespace(input_tokens=1200, output_tokens=800))
+
+
+GPT_PRICE = ai.Model("GPT-5.6", "", 2.0, 8.0, "openai")
+
+
+def test_openai_client_sends_photos_and_a_strict_schema(settings, monkeypatch):
+    settings.openai_api_key, settings.ai_provider, settings.ai_model = (
+        "sk-oai", "openai", "gpt-5.6")
+    sent, clients = fake_openai(monkeypatch, response('{"photos": []}'))
+    reply = ai.ask(settings, "system prompt", ["photo_01", b"\xff\xd8"],
+                   va.Selection.model_json_schema(), GPT_PRICE)
+    assert (reply.data, reply.raw, reply.request_id) == ({"photos": []}, '{"photos": []}',
+                                                         "req_oai")
+    assert reply.usage == {"model": "gpt-5.6-2026-03-01", "input_tokens": 1200,
+                           "output_tokens": 800, "cost_usd": 0.0088}  # 1,200 x $2 + 800 x $8
+    assert clients == [{"api_key": "sk-oai", "timeout": ai.TIMEOUT}]
+    assert sent["model"] == "gpt-5.6" and sent["instructions"] == "system prompt"
+    assert sent["reasoning"] == {"effort": "high"} and sent["max_output_tokens"] == ai.MAX_TOKENS
+    assert sent["input"] == [{"role": "user", "content": [
+        {"type": "input_text", "text": "photo_01"},
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,/9g=", "detail": "high"}]}]
+    fmt = sent["text"]["format"]
+    assert (fmt["type"], fmt["name"], fmt["strict"]) == ("json_schema", "Selection", True)
+    assert fmt["schema"] == va.Selection.model_json_schema()  # closed, every field required
+    # the record of what was sent: the same parameters, the photo by its size
+    assert reply.request == {**{k: v for k, v in sent.items() if k != "input"},
+                             "timeout_seconds": ai.TIMEOUT, "input": [{"role": "user", "content": [
+                                 {"type": "input_text", "text": "photo_01"},
+                                 {"type": "input_image", "media_type": "image/jpeg", "bytes": 2,
+                                  "detail": "high"}]}]}
+
+
+@pytest.mark.parametrize("model", [va.Selection, *va.SCHEMAS.values()])
+def test_answer_schemas_suit_strict_structured_outputs(model):
+    """OpenAI's strict mode, which they are sent as is: every object closed, every property
+    required, no defaults."""
+    def objects(node):
+        if isinstance(node, dict):
+            if "properties" in node:
+                yield node
+            for value in node.values():
+                yield from objects(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from objects(value)
+
+    schema = model.model_json_schema()
+    assert '"default"' not in json.dumps(schema)
+    for obj in objects(schema):
+        assert obj["additionalProperties"] is False and obj["required"] == list(obj["properties"])
+
+
+@pytest.mark.parametrize(("reply", "error", "raw"), [
+    (response("", refusal="I can't help with that."),
+     "the model declined the request (I can't help with that.)", ""),
+    (response('{"photos": [', "incomplete", "max_output_tokens"),
+     "cut off at the token limit", '{"photos": ['),
+    (response('{"photos": [', "incomplete", "content_filter"),
+     "the answer is incomplete (content_filter)", '{"photos": ['),
+    (response("Sure! Here it is"), "not valid JSON", "Sure! Here it is"),
+])
+def test_openai_answers_that_are_not_usable_fail_with_the_raw_text(
+        settings, monkeypatch, reply, error, raw):
+    settings.ai_provider = "openai"
+    fake_openai(monkeypatch, reply)
+    with pytest.raises(ai.AIError, match=re.escape(error)) as caught:
+        ai.ask(settings, "s", ["t"], {"type": "object", "title": "T"}, GPT_PRICE)
+    assert (caught.value.raw, caught.value.request_id) == (raw, "req_oai")
+    assert caught.value.usage["cost_usd"] == 0.0088  # the answer came back: it is billed
+    assert caught.value.request["instructions"] == "s"
+
+
+def test_openai_errors_become_ai_errors(settings, monkeypatch):
+    settings.ai_provider = "openai"
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    bad = httpx.Response(400, request=request, headers={"x-request-id": "req_bad"})
+    fake_openai(monkeypatch, openai.BadRequestError("image too large", response=bad, body=None))
+    with pytest.raises(ai.AIError, match=r"rejected the request \(400\): image too large") as e:
+        ai.ask(settings, "s", ["t"], {"type": "object", "title": "T"})
+    assert e.value.request_id == "req_bad" and e.value.usage is None
+
+    fake_openai(monkeypatch, openai.APITimeoutError(request=request))
+    with pytest.raises(ai.AIError, match="the AI request failed: APITimeoutError") as e:
+        ai.ask(settings, "s", ["t"], {"type": "object", "title": "T"})
+    assert e.value.request["input"][0]["content"] == [{"type": "input_text", "text": "t"}]
+
+
+# --- the providers' model lists ------------------------------------------------------------------
+
+def capabilities(images=True, structured=True, high_effort=True):
+    def support(value):
+        return SimpleNamespace(supported=value)
+
+    return SimpleNamespace(image_input=support(images), structured_outputs=support(structured),
+                           effort=SimpleNamespace(supported=high_effort,
+                                                  high=support(high_effort)))
+
+
+def test_anthropic_models_that_take_the_request_are_listed(settings, monkeypatch):
+    settings.anthropic_api_key = "sk-test"
+    listed = [SimpleNamespace(id=id_, display_name=name, capabilities=caps) for id_, name, caps in [
+        ("claude-opus-5-5", "Claude Opus 5.5", capabilities()),
+        ("claude-haiku-3", "Claude Haiku 3", capabilities(structured=False)),
+        ("claude-text-1", "Claude Text 1", capabilities(images=False)),
+        ("claude-quick-1", "Claude Quick 1", capabilities(high_effort=False)),
+        ("claude-next", "Claude Next", None)]]  # capabilities unknown: offered
+    clients, asked = [], []
+
+    def client(**kwargs):
+        clients.append(kwargs)
+        return SimpleNamespace(models=SimpleNamespace(
+            list=lambda **kw: asked.append(kw) or iter(listed)))
+
+    monkeypatch.setattr(ai.anthropic, "Anthropic", client)
+    assert ai.MODEL_LISTS["anthropic"](settings) == [
+        {"id": "claude-opus-5-5", "label": "Claude Opus 5.5"},
+        {"id": "claude-next", "label": "Claude Next"}]
+    assert clients == [{"api_key": "sk-test", "timeout": ai.LIST_TIMEOUT}]
+    assert asked == [{"limit": 1000}]
+
+
+def test_openai_models_are_listed_by_name_newest_first(settings, monkeypatch):
+    settings.openai_api_key = "sk-oai"
+    names = ["gpt-4o", "gpt-5.6", "gpt-5.6-mini", "o3", "o4-mini", "gpt-5-chat-latest",
+             "gpt-realtime", "gpt-4o-transcribe", "o3-deep-research", "gpt-image-1",
+             "gpt-5-search-api", "text-embedding-3-large", "gpt-audio", "tts-1"]
+    models = [SimpleNamespace(id=name, created=n) for n, name in enumerate(names)]
+    fake_openai(monkeypatch, models=models)
+    assert [m["id"] for m in ai.MODEL_LISTS["openai"](settings)] == [
+        "o4-mini", "o3", "gpt-5.6-mini", "gpt-5.6"]
+
+
+def test_model_lists_need_the_key_and_report_failures(settings, monkeypatch):
+    for provider, variable in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY")):
+        with pytest.raises(ai.AIError, match=f"set {variable} in .env"):
+            ai.MODEL_LISTS[provider](settings)
+
+    settings.openai_api_key = "sk-oai"
+    fake_openai(monkeypatch, models=openai.APIConnectionError(
+        request=httpx.Request("GET", "https://api.openai.com/v1/models")))
+    with pytest.raises(ai.AIError, match="APIConnectionError"):
+        ai.MODEL_LISTS["openai"](settings)
+
+    settings.anthropic_api_key = "sk-test"
+
+    def broken(**kwargs):
+        raise anthropic.APITimeoutError(request=httpx2.Request("GET", "https://x.test"))
+
+    monkeypatch.setattr(ai.anthropic, "Anthropic", lambda **kw: SimpleNamespace(
+        models=SimpleNamespace(list=broken)))
+    with pytest.raises(ai.AIError, match="APITimeoutError"):
+        ai.MODEL_LISTS["anthropic"](settings)

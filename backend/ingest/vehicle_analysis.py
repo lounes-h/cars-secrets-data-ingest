@@ -429,12 +429,12 @@ class AnalysisError(Exception):
 
 
 def ask(settings: Settings, record: dict[str, Any], step: str, system: str,
-        parts: list[ai.Part], schema: dict[str, Any]) -> ai.Reply:
+        parts: list[ai.Part], schema: dict[str, Any], asked: ai.Model | None) -> ai.Reply:
     """`ai.ask`, keeping what the call sent under `request[step]` and its tokens and cost under
     `usage[step]`, also when it fails (an answer that came back unusable is billed all the
     same)."""
     try:
-        reply = ai.ask(settings, system, parts, schema)
+        reply = ai.ask(settings, system, parts, schema, asked)
     except ai.AIError as exc:
         if exc.request:
             record["request"][step] = exc.request
@@ -446,7 +446,7 @@ def ask(settings: Settings, record: dict[str, Any], step: str, system: str,
 
 
 def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photos: list[Photo],
-                  record: dict[str, Any]) -> list[Photo]:
+                  record: dict[str, Any], asked: ai.Model | None) -> list[Photo]:
     if len(photos) <= settings.ai_max_images:
         return photos
     ids = [f"photo_{n:02d}" for n in range(1, len(photos) + 1)]
@@ -456,7 +456,7 @@ def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photo
     for photo_id, photo in zip(ids, photos, strict=True):
         parts += [photo_id, shrink(photo.jpeg, SELECTION_PX)[0]]
     reply = ask(settings, record, "selection", prompt.select, parts,
-                Selection.model_json_schema())
+                Selection.model_json_schema(), asked)
     record["selection"]["request_id"] = reply.request_id
     try:
         selection = Selection.model_validate(reply.data)
@@ -470,7 +470,12 @@ def select_photos(settings: Settings, prompt: Prompt, lot: dict[str, Any], photo
 def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
             record: dict[str, Any]) -> dict:
     """The validated analysis; fills `record` with what was sent and received on the way."""
-    settings = settings.model_copy(update={"ai_model": analysis["model"]})  # the one requested
+    # the model requested, on its provider; an added one also has its price
+    settings = settings.model_copy(update={"ai_model": analysis["model"],
+                                           "ai_provider": analysis["provider"]})
+    added = conn.execute("""SELECT label, note, input_usd, output_usd, provider FROM ai_models
+                            WHERE id = %s""", (analysis["model"],)).fetchone()
+    asked = ai.Model(**added) if added else None
     prompt = PROMPTS.get(analysis["prompt_version"])
     if prompt is None:
         raise AnalysisError(f"unknown prompt version {analysis['prompt_version']!r}")
@@ -499,7 +504,7 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
     if not photos:
         raise AnalysisError("the lot has no usable photos" if not images else
                             f"none of the lot's {len(images)} photos could be used")
-    photos = select_photos(settings, prompt, lot, photos, record)
+    photos = select_photos(settings, prompt, lot, photos, record, asked)
 
     parts: list[ai.Part] = [
         "Auction metadata (reported by the auction or the seller; may be incomplete or wrong):\n"
@@ -519,7 +524,7 @@ def analyze(conn: Connection, settings: Settings, analysis: dict[str, Any],
     system = prompt.analyze.format(language=LANGUAGES[language], language_code=language,
                                    schema_version=analysis["schema_version"])
     schema = SCHEMAS[analysis["schema_version"]]
-    reply = ask(settings, record, "analysis", system, parts, schema.model_json_schema())
+    reply = ask(settings, record, "analysis", system, parts, schema.model_json_schema(), asked)
     record.update(raw_response=reply.raw, provider_request_id=reply.request_id)
     return validate(reply.data, analysis["schema_version"], {s["image_id"] for s in sent},
                     language)
@@ -558,10 +563,12 @@ def run(conn: Connection, settings: Settings, analysis: dict[str, Any]) -> dict[
 
 def claim(conn: Connection, settings: Settings) -> dict[str, Any] | None:
     """Take the oldest queued analysis and stamp it with what will run it: the model its
-    request chose, else AI_MODEL."""
+    request chose, else AI_MODEL, on the provider of the added model it chose, else
+    AI_PROVIDER."""
     row = conn.execute(
         """UPDATE vehicle_analyses
-           SET status = 'processing', provider = %s, model = coalesce(model, %s),
+           SET status = 'processing', provider = coalesce(provider, %s),
+               model = coalesce(model, %s),
                prompt_version = %s,
                schema_version = %s, started_at = clock_timestamp(), updated_at = clock_timestamp()
            WHERE id = (SELECT id FROM vehicle_analyses WHERE status = 'queued'

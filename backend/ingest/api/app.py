@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import StreamingResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import ai, vehicle_analysis
 from ..config import Settings, get_settings
@@ -161,6 +161,7 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
     limiter = auth.LoginRateLimiter()
     image_cache = TTLCache(ttl_seconds=15 * 60)
     filter_cache = TTLCache(ttl_seconds=15 * 60)
+    model_list_cache = TTLCache(ttl_seconds=15 * 60)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -655,15 +656,82 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
                 ORDER BY id DESC LIMIT 1""", key).fetchone()
         return {"latest": latest, "current": current}
 
+    ADDED_MODEL = "id, provider, label, note, input_usd, output_usd, true AS custom"
+
     @api.get("/analysis-models")
-    def analysis_models() -> dict[str, Any]:
-        """The models an analysis may use, with their prices, and the default (AI_MODEL)."""
+    def analysis_models(conn: Conn) -> dict[str, Any]:
+        """The models an analysis may use, with their prices, and the default (AI_MODEL): the
+        built-in ones, then those people added (`custom`, which they may change)."""
+        added = conn.execute(
+            f"SELECT {ADDED_MODEL} FROM ai_models ORDER BY created_at, id").fetchall()
         return {"default": settings.ai_model,
-                "models": [{"id": k, **asdict(m)} for k, m in ai.MODELS.items()]}
+                "models": [{"id": k, **asdict(m), "custom": False} for k, m in ai.MODELS.items()]
+                + added}
+
+    @api.get("/analysis-models/available")
+    def available_models(provider: str) -> dict[str, Any]:
+        """The provider's models, offered when a person adds one (cached)."""
+        if provider not in ai.MODEL_LISTS:
+            raise HTTPException(422, f"unknown provider {provider!r}")
+        models = model_list_cache.get(provider)
+        if models is None:
+            try:
+                models = ai.MODEL_LISTS[provider](settings)
+            except ai.AIError as exc:
+                raise HTTPException(502, f"could not list the models: {exc}") from None
+            model_list_cache.put(provider, models)
+        return {"models": models}
+
+    class AddedModel(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+
+        id: str = Field(max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+        provider: str
+        label: str = Field(min_length=1, max_length=100)
+        note: str = Field("", max_length=300)
+        input_usd: float = Field(ge=0, le=10_000)  # per million tokens
+        output_usd: float = Field(ge=0, le=10_000)
+
+    def save_model(conn: psycopg.Connection, sql: str, body: AddedModel,
+                   **params: Any) -> dict[str, Any] | None:
+        if body.provider not in ai.CLIENTS:
+            raise HTTPException(422, f"unknown provider {body.provider!r}")
+        taken = HTTPException(409, f"the model {body.id!r} already exists")
+        if body.id in ai.MODELS:
+            raise taken
+        try:
+            return conn.execute(sql, {**body.model_dump(), **params}).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise taken from None
+
+    @api.post("/analysis-models", status_code=201)
+    def add_model(body: AddedModel, conn: Conn, user: User) -> dict[str, Any]:
+        return save_model(conn, f"""
+            INSERT INTO ai_models (id, provider, label, note, input_usd, output_usd, created_by)
+            VALUES (%(id)s, %(provider)s, %(label)s, %(note)s, %(input_usd)s, %(output_usd)s,
+                    %(user)s)
+            RETURNING {ADDED_MODEL}""", body, user=user)
+
+    @api.put("/analysis-models/{model_id}")
+    def change_model(model_id: str, body: AddedModel, conn: Conn) -> dict[str, Any]:
+        """Past analyses keep the id and cost they ran with."""
+        row = save_model(conn, f"""
+            UPDATE ai_models SET id = %(id)s, provider = %(provider)s, label = %(label)s,
+                note = %(note)s, input_usd = %(input_usd)s, output_usd = %(output_usd)s,
+                updated_at = clock_timestamp()
+            WHERE id = %(model_id)s RETURNING {ADDED_MODEL}""", body, model_id=model_id)
+        if row is None:
+            raise HTTPException(404, "no such added model")
+        return row
+
+    @api.delete("/analysis-models/{model_id}", status_code=204)
+    def delete_model(model_id: str, conn: Conn) -> None:
+        if conn.execute("DELETE FROM ai_models WHERE id = %s", (model_id,)).rowcount == 0:
+            raise HTTPException(404, "no such added model")
 
     class AnalysisRequest(BaseModel):
         language: str | None = None  # default: AI_LANGUAGE
-        model: str | None = None  # default: AI_MODEL; one of ai.MODELS
+        model: str | None = None  # default: AI_MODEL; one of ai.MODELS or an added model
 
     @api.post("/lots/{source}/{lot_number}/analyses", status_code=202)
     def request_analysis(source: str, lot_number: str, conn: Conn, user: User,
@@ -673,15 +741,20 @@ def create_app(settings: Settings | None = None, *, background: bool = True) -> 
         if language not in vehicle_analysis.LANGUAGES:
             raise HTTPException(422, f"unsupported language {language!r}")
         model = (body.model if body else None) or settings.ai_model
-        if model not in ai.MODELS:  # a client never picks an unlisted (unpriced) model
+        # a client never picks an unlisted (unpriced) model; an added one runs on its provider,
+        # a built-in one on the worker's AI_PROVIDER
+        added = conn.execute("SELECT provider FROM ai_models WHERE id = %s",
+                             (model,)).fetchone()
+        if model not in ai.MODELS and added is None:
             raise HTTPException(422, f"unsupported model {model!r}")
         lot_exists(conn, source, lot_number)
         try:
             row = conn.execute(
-                f"""INSERT INTO vehicle_analyses (source, lot_number, language, model,
+                f"""INSERT INTO vehicle_analyses (source, lot_number, language, model, provider,
                                                   requested_by)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING {ANALYSIS_COLUMNS}""",
-                (source, lot_number, language, model, user)).fetchone()
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING {ANALYSIS_COLUMNS}""",
+                (source, lot_number, language, model, added and added["provider"],
+                 user)).fetchone()
         except psycopg.errors.UniqueViolation:
             raise HTTPException(409, "an analysis of this lot is already in progress") from None
         notify(conn, "analysis", id=row["id"], source=source, lot_number=lot_number,

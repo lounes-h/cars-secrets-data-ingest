@@ -309,7 +309,13 @@ export interface AnalysisModel {
   note: string;
   input_usd: number;
   output_usd: number;
+  /** "anthropic" or "openai" */
+  provider: string;
+  /** Added by a person, who may change or delete it; the others are built in. */
+  custom: boolean;
 }
+
+export type AddedModel = Omit<AnalysisModel, "custom">;
 
 export interface LotAnalyses {
   /** The latest completed analysis, shown on the lot page. */
@@ -408,6 +414,12 @@ export const api = {
     request<LotAnalyses>(
       "GET", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`),
   analysisModels: () => request<{ default: string; models: AnalysisModel[] }>("GET", "/api/analysis-models"),
+  availableModels: (provider: string) =>
+    request<{ models: { id: string; label: string }[] }>("GET", withParams("/api/analysis-models/available", { provider })),
+  addModel: (model: AddedModel) => request<AnalysisModel>("POST", "/api/analysis-models", model),
+  updateModel: (id: string, model: AddedModel) =>
+    request<AnalysisModel>("PUT", `/api/analysis-models/${encodeURIComponent(id)}`, model),
+  deleteModel: (id: string) => request<void>("DELETE", `/api/analysis-models/${encodeURIComponent(id)}`),
   requestAnalysis: (source: string, lotNumber: string, model: string) =>
     request<VehicleAnalysis>(
       "POST", `/api/lots/${encodeURIComponent(source)}/${encodeURIComponent(lotNumber)}/analyses`, { model }),

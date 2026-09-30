@@ -85,10 +85,11 @@ const attempt = (status: VehicleAnalysis["status"], extra: Partial<VehicleAnalys
 const models = {
   default: "claude-opus-5-5",
   models: [
-    { id: "claude-opus-5-5", label: "Claude Opus 5.5", note: "Anthropic's current Opus model", input_usd: 4, output_usd: 20 },
-    { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", note: "Faster, half the price of Opus 5.5", input_usd: 2, output_usd: 10 },
+    { id: "claude-opus-5-5", label: "Claude Opus 5.5", note: "Anthropic's current Opus model", input_usd: 4, output_usd: 20, provider: "anthropic", custom: false },
+    { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", note: "Faster, half the price of Opus 5.5", input_usd: 2, output_usd: 10, provider: "anthropic", custom: false },
   ],
 };
+const gpt = { id: "gpt-5.6", label: "GPT-5.6", note: "", input_usd: 2, output_usd: 8, provider: "openai", custom: true };
 
 /** Opens the model dialog with the page's button and confirms with the chosen model. */
 async function generateWith(button: string, model?: string) {
@@ -273,6 +274,110 @@ describe("AI analysis", () => {
     const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
     expect(await within(dialog).findByText("models unavailable")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Generate" })).toBeDisabled();
+  });
+
+  it("adds a model from the provider's list, with its price, and picks it", async () => {
+    show({ latest: null, current: null });
+    const listed = vi.spyOn(api, "availableModels").mockImplementation(async (provider) => ({
+      models: provider === "anthropic"
+        ? [{ id: "claude-haiku-5", label: "Claude Haiku 5" }] : [{ id: "gpt-5.6", label: "gpt-5.6" }],
+    }));
+    const haiku = { id: "claude-haiku-5", provider: "anthropic", label: "Claude Haiku 5", note: "Cheap", input_usd: 1, output_usd: 5 };
+    const add = vi.spyOn(api, "addModel").mockResolvedValue({ ...haiku, custom: true });
+    const request = vi.spyOn(api, "requestAnalysis").mockResolvedValue(attempt("queued"));
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Add a model" }));
+
+    const form = within(dialog).getByRole("form", { name: "Add a model" });
+    expect(await within(form).findByText(/1 model offered by Anthropic/)).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText("Provider"), { target: { value: "openai" } });
+    expect(await within(form).findByText(/1 model offered by OpenAI/)).toBeInTheDocument();
+    expect(listed).toHaveBeenLastCalledWith("openai");
+    expect([...dialog.querySelectorAll("datalist option")].map((o) => o.getAttribute("value"))).toEqual(["gpt-5.6"]);
+    fireEvent.change(within(form).getByLabelText("Provider"), { target: { value: "anthropic" } });
+    await within(form).findByText(/1 model offered by Anthropic/);
+
+    // choosing a listed id fills in its name
+    fireEvent.change(within(form).getByLabelText("Model id"), { target: { value: "claude-haiku-5" } });
+    expect(within(form).getByLabelText("Name")).toHaveValue("Claude Haiku 5");
+    fireEvent.change(within(form).getByLabelText("Note"), { target: { value: "Cheap" } });
+    fireEvent.change(within(form).getByLabelText(/Input/), { target: { value: "1" } });
+    fireEvent.change(within(form).getByLabelText(/Output/), { target: { value: "5" } });
+    vi.spyOn(api, "analysisModels").mockResolvedValue({ ...models, models: [...models.models, { ...haiku, custom: true }] });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+
+    expect(await within(dialog).findByRole("radio", { name: /Claude Haiku 5/ })).toBeChecked();
+    expect(add).toHaveBeenCalledWith(haiku);
+    expect(within(dialog).getByText(/Anthropic · Cheap · \$1 in \/ \$5 out/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Generate" }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith("copart", "68264956", "claude-haiku-5"));
+  });
+
+  it("changes and deletes an added model, never a built-in one", async () => {
+    show({ latest: null, current: null }, { ...models, models: [...models.models, gpt] });
+    vi.spyOn(api, "availableModels").mockResolvedValue({ models: [] });
+    const update = vi.spyOn(api, "updateModel").mockResolvedValue({ ...gpt, input_usd: 1.5 });
+    const remove = vi.spyOn(api, "deleteModel").mockResolvedValue(undefined);
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    fireEvent.click(await within(dialog).findByRole("radio", { name: /GPT-5.6/ }));
+    expect(within(dialog).getAllByRole("button", { name: /^Edit/ })).toHaveLength(1);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Edit GPT-5.6" }));
+    const form = within(dialog).getByRole("form", { name: "Edit GPT-5.6" });
+    expect(within(form).getByLabelText("Provider")).toHaveValue("openai");
+    expect(within(form).getByLabelText("Model id")).toHaveValue("gpt-5.6");
+    expect(await within(form).findByText(/0 models offered by OpenAI/)).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText(/Input/), { target: { value: "1.5" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith("gpt-5.6", {
+      id: "gpt-5.6", provider: "openai", label: "GPT-5.6", note: "", input_usd: 1.5, output_usd: 8,
+    }));
+
+    vi.spyOn(api, "analysisModels").mockResolvedValue(models);
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Delete GPT-5.6" }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("gpt-5.6"));
+    expect(await within(dialog).findByRole("radio", { name: /Claude Opus 5.5/ })).toBeChecked();  // back to the default
+  });
+
+  it("lets the id be typed when the provider's models cannot be listed, and shows why a save failed", async () => {
+    show({ latest: null, current: null });
+    vi.spyOn(api, "availableModels").mockRejectedValue(
+      new ApiError(502, "could not list the models: set OPENAI_API_KEY in .env to list the provider's models"));
+    vi.spyOn(api, "addModel").mockRejectedValue(new ApiError(409, "the model 'o4' already exists"));
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Add a model" }));
+    const form = within(dialog).getByRole("form", { name: "Add a model" });
+    expect(await within(form).findByText(/set OPENAI_API_KEY in .env/)).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText("Model id"), { target: { value: "o4" } });
+    expect(within(form).getByLabelText("Name")).toHaveValue("");  // not a listed id
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "o4" } });
+    fireEvent.submit(form);
+    expect(await within(form).findByRole("alert")).toHaveTextContent("the model 'o4' already exists");
+
+    fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+    expect(within(dialog).queryByRole("form", { name: "Add a model" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: /Claude Opus 5.5/ })).toBeChecked();
+    // reopening the dialog starts on the models, not on a form left open
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add a model" }));
+    (dialog as HTMLDialogElement).close();  // Escape
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    expect(within(dialog).getByRole("button", { name: "Generate" })).toBeInTheDocument();
+  });
+
+  it("says when an added model could not be deleted", async () => {
+    show({ latest: null, current: null }, { ...models, models: [...models.models, gpt] });
+    vi.spyOn(api, "deleteModel").mockRejectedValue(new ApiError(404, "no such added model"));
+    await screen.findByText(/No analysis yet/);
+    fireEvent.click(screen.getByRole("button", { name: "Generate AI Analysis" }));
+    const dialog = screen.getByRole("dialog", { name: "Generate AI Analysis" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Delete GPT-5.6" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("no such added model");
   });
 
   it("shows a load error and keeps the button disabled", async () => {
