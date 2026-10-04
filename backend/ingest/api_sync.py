@@ -1,9 +1,10 @@
 """Keeps the API's database in step with `lots`.
 
 The API (cars-secrets-api) serves lots from its own database, which stays small: it holds every
-active lot, and a removed lot only until its auction is surely over (`sale_at` +
-`API_KEEP_AFTER_SALE_MINUTES`), with just the columns the API serves. History, `attributes`
-and the ingest's bookkeeping stay in the ingest database, the source of truth.
+active lot but the providers' test lots (`Provider.test_lots`), and a removed lot only until its
+auction is surely over (`sale_at` + `API_KEEP_AFTER_SALE_MINUTES`), with just the columns the
+API serves. History, `attributes` and the ingest's bookkeeping stay in the ingest database, the
+source of truth.
 
 Every write that changes a served column of a lot draws a new `lots.sync_version`, and loads
 hold one global lock, so versions become visible in the order they were drawn. A sync reads
@@ -23,6 +24,7 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from .providers import PROVIDERS
 from .schema import CANONICAL_COLUMNS
 
 # The API table's columns, in COPY order.
@@ -42,6 +44,11 @@ _STAGE_DDL = ", ".join(f"{name} {sql_type}" for name, sql_type in COLUMNS) + ", 
 # past (loader._mark_removed); removed_at is the fallback should that ever change.
 _KEEP = ("removed_at IS NULL OR "
          "coalesce(sale_at, removed_at) + make_interval(mins => %(keep)s) > now()")
+# The providers' test lots are never served. Only the ingest database can tell them apart
+# (`attributes`), so the purge, which runs on the API database, keeps to `_KEEP`.
+_TEST = " OR ".join(f"(source = '{p.name}' AND ({p.test_lots}))"
+                    for p in PROVIDERS.values() if p.test_lots) or "false"
+_SERVE = f"({_KEEP}) AND NOT coalesce({_TEST}, false)"
 # Columns only the ingest's own `lots` has: seeing one means the URL points at that database.
 _INGEST_ONLY = {"attributes", "row_hash", "sync_version"}
 
@@ -109,10 +116,10 @@ def sync(conn: Connection, api_url: str, keep_minutes: int) -> SyncResult:
             if version < since:  # the ingest database was restored or rebuilt
                 full, since = True, 0
             if full or version > since:
-                where = f"({_KEEP})" if full else "sync_version > %(since)s"
+                where = _SERVE if full else "sync_version > %(since)s"
                 api.execute(f"CREATE TEMP TABLE sync_stage ({_STAGE_DDL}) ON COMMIT DROP")
                 with (conn.cursor().copy(
-                          f"COPY (SELECT {_NAMES}, {_KEEP} FROM lots WHERE {where}) TO STDOUT",
+                          f"COPY (SELECT {_NAMES}, {_SERVE} FROM lots WHERE {where}) TO STDOUT",
                           {**params, "since": since}) as out,
                       api.cursor().copy(
                           f"COPY sync_stage ({_NAMES}, keep) FROM STDIN") as into):

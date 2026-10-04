@@ -98,7 +98,9 @@ the frontend's typecheck, `test:coverage` and build on every pull request and on
 - **API database** (`api_sync.py`): `cars-secrets-api` reads its own database, which stays
   small: every active lot, and a removed lot only until `sale_at` +
   `API_KEEP_AFTER_SALE_MINUTES` (240; auctions run 2–4 h), with only the columns it serves
-  (`api_sync.COLUMNS`: no `attributes`, history or file ids). The ingest database stays the
+  (`api_sync.COLUMNS`: no `attributes`, history or file ids). A provider's own test lots
+  (`Provider.test_lots`: Copart's test yards and "TSS TEST SUB LOT" notes) stay in the ingest
+  database and never reach the API database. The ingest database stays the
   source of truth. Every write that changes a served column draws a new `lots.sync_version`
   (`loader.NEXT_SYNC_VERSION`); loads hold one global advisory lock, so versions become
   visible in order. The worker copies the lots above the API database's watermark

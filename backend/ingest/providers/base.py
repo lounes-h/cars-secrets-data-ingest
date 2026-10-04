@@ -77,6 +77,9 @@ class Provider:
     fetch_images: Callable[[Mapping[str, Any]], LotImages] | None = None
     # The lot's page on the provider's site: where dealers see everything and go to bid.
     listing_url: Callable[[str], str] | None = None
+    # SQL condition over `lots` that holds for the provider's own test lots, which its exports
+    # carry like real ones: they stay here but never reach the API database (`%` as `%%`).
+    test_lots: str | None = None
 
     def __post_init__(self) -> None:
         if self.removal_scope is not None and self.removal_scope not in COLUMN_INDEX:
