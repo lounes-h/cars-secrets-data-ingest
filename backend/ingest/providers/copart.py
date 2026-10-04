@@ -215,4 +215,7 @@ COPART = Provider(
     removal_scope_label="yard",
     fetch_images=images,
     listing_url=listing_url,
+    # Copart's test yards ("TS - TEST STAGE Prod", "TSS TEST YARD") and the test sub-lots it
+    # parks in real yards ("TSS TEST SUB LOT"). "*Not tested*" is a real lot's note.
+    test_lots=r"yard_name ~* '\mTEST\M' OR attributes ->> 'special_note' ~* '\mTEST\M'",
 )

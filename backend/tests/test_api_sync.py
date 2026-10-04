@@ -123,6 +123,29 @@ def test_removed_lot_stays_until_its_auction_is_surely_over(conn, settings, make
     assert lots[live]["removed_at"] is None and lots[finished]["removed_at"] is None
 
 
+def test_copart_test_lots_are_never_served(conn, settings, make_export, api_url):
+    header, rows = read_sample()
+    rows = [list(r) for r in rows]
+    rows[0][col(header, "Yard name")] = "TS - TEST STAGE Prod"
+    rows[1][col(header, "Special Note")] = "TSS TEST SUB LOT"
+    rows[2][col(header, "Special Note")] = "Biohazard for suspected narcotics *Not tested*"
+    test_yard, sub_lot, real = lot_numbers(rows[:3])
+    ingest(conn, make_export(rows), settings)
+
+    sync(conn, api_url)
+
+    served = api_lots(api_url)
+    assert set(served) == set(ingest_lots(conn)) - {test_yard, sub_lot}
+    assert real in served
+
+    # A served lot moved to a test yard leaves at the next sync.
+    rows[2][col(header, "Yard name")] = "TSS TEST YARD"
+    ingest(conn, make_export(rows), settings)
+    result = sync(conn, api_url)
+    assert (result.full, result.copied, result.deleted) == (False, 0, 1)
+    assert real not in api_lots(api_url)
+
+
 def test_a_typed_column_that_changes_without_a_new_hash_is_synced(
         conn, settings, make_export, api_url):
     """A new mapping (or a header alias) fills a typed column although the export's values,

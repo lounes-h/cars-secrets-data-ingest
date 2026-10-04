@@ -129,7 +129,7 @@ database keeps every lot ever seen, with its history, and grows every day.
 
 | API database table | Holds |
 |---|---|
-| `lots` | Every active lot, and each removed lot until `sale_at` + `API_KEEP_AFTER_SALE_MINUTES` (240): the lot's auction runs 2–4 h after its sale time. Columns: `source`, `lot_number`, the canonical columns, `first_seen_at`, `last_changed_at`, `removed_at`, `predicted_final_price` (no `attributes`, hashes or file ids) |
+| `lots` | Every active lot but the provider's own test lots (`Provider.test_lots`: Copart's test yards, such as "TS - TEST STAGE Prod", and lots noted "TSS TEST SUB LOT"), and each removed lot until `sale_at` + `API_KEEP_AFTER_SALE_MINUTES` (240): the lot's auction runs 2–4 h after its sale time. Columns: `source`, `lot_number`, the canonical columns, `first_seen_at`, `last_changed_at`, `removed_at`, `predicted_final_price` (no `attributes`, hashes or file ids) |
 | `ingest_sync` | One row: the `sync_version` the table is at, and when it got there |
 
 The worker creates both tables and their indexes (`api_sync.ensure_schema`). A canonical
